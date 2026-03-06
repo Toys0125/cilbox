@@ -473,6 +473,25 @@ namespace TestCilbox
 			Validator.Validate("myBehaviour3Arr 1", "456");
 			Validator.Validate("myBehaviour3Arr 1 changed", "789");
 
+			Validator.Validate("DeepCtorDepth", "10");
+			Validator.Validate("DeepCtorRootValue", "101");
+			Validator.Validate("DeepCtorMidValue", "505");
+			Validator.Validate("DeepCtorLeafValue", "424242");
+			Validator.Validate("DeepCtorChecksum", "L1:101|L2:202|L3:303|L4:404|L5:505|L6:606|L7:707|L8:808|L9:909|L10:1010");
+
+			Validator.Validate("InterfaceShapeHolderReady", "True");
+			Validator.Validate("InterfaceShapeFieldNotNull", "True");
+			Validator.Validate("InterfaceShapeConcreteValue", "4242");
+			Validator.Validate("InterfaceShapeConcreteLabel", "payload-label");
+			Validator.Validate("InterfaceShapeCastValue", "4242");
+			Validator.Validate("InterfaceShapeRelayValue", "4242");
+			Validator.Validate("InterfaceShapeRelayLabel", "payload-label");
+			Validator.Validate("InterfaceShapeSharedPrimaryValue", "4242");
+			Validator.Validate("InterfaceShapeSharedSecondaryValue", "8181");
+			Validator.Validate("InterfaceShapeSharedConcreteValue", "4242");
+			Validator.Validate("InterfaceShapeSharedVariantValue", "8181");
+			Validator.Validate("InterfaceShapeSharedLabels", "payload-label|variant-label");
+
 			Validator.Validate("ThrowFromOtherBehaviour1", "caught");
 			Validator.Validate("ThrowFromOtherBehaviour2", "caught");
 			Validator.Validate("ThrowFromOtherBehaviour2Finally", "finally");

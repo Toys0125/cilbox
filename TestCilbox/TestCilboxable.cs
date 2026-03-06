@@ -361,6 +361,9 @@ namespace TestCilbox
 			myBehaviour3Arr[1].number = 789;
 			Validator.Set("myBehaviour3Arr 1 changed", myBehaviour3Arr[1].number.ToString());
 
+			RunDeepConstructorReferenceTest();
+			RunInterfaceShapeReferenceTest();
+
 			try
 			{
 				Validator.Set("ThrowFromOtherBehaviour1", "try");
@@ -412,6 +415,63 @@ namespace TestCilbox
 			Validator.Set( "Execution after timeout", "enabled" );
 			Validator.Set( "Manual Recover After Timeout", "recovered" );
 			Validator.Set( "FixedUpdate", "called" );
+		}
+
+		public void RunDeepConstructorReferenceTest()
+		{
+			DeepCtorLevel1 root = new DeepCtorLevel1(
+				new DeepCtorLevel2(
+					new DeepCtorLevel3(
+						new DeepCtorLevel4(
+							new DeepCtorLevel5(
+								new DeepCtorLevel6(
+									new DeepCtorLevel7(
+										new DeepCtorLevel8(
+											new DeepCtorLevel9(
+												new DeepCtorLevel10())))))))));
+
+			DeepCtorLevel2 level2 = root.child;
+			DeepCtorLevel3 level3 = level2.child;
+			DeepCtorLevel4 level4 = level3.child;
+			DeepCtorLevel5 level5 = level4.child;
+			DeepCtorLevel6 level6 = level5.child;
+			DeepCtorLevel7 level7 = level6.child;
+			DeepCtorLevel8 level8 = level7.child;
+			DeepCtorLevel9 level9 = level8.child;
+			DeepCtorLevel10 level10 = level9.child;
+			int depth = 10;
+
+			Validator.Set("DeepCtorDepth", depth.ToString());
+			Validator.Set("DeepCtorRootValue", root.levelValue.ToString());
+			Validator.Set("DeepCtorMidValue", level5.levelValue.ToString());
+			Validator.Set("DeepCtorLeafValue", level10.leafValue.ToString());
+			Validator.Set("DeepCtorChecksum", root.checksum);
+		}
+
+		public void RunInterfaceShapeReferenceTest()
+		{
+			InterfaceShapePayload payload = new InterfaceShapePayload(4242, "payload-label");
+			InterfaceShapePayloadVariant variant = new InterfaceShapePayloadVariant(8181, "variant-label");
+			InterfaceShapeHolder holder = new InterfaceShapeHolder(payload);
+			InterfaceShapeRelay relay = new InterfaceShapeRelay(holder);
+			InterfaceShapeSharedVariableHolder sharedHolder = new InterfaceShapeSharedVariableHolder(payload, variant);
+			InterfaceShapePayload castFromHolder = (InterfaceShapePayload)holder.asInterface;
+			InterfaceShapePayload castFromRelay = (InterfaceShapePayload)relay.relayedInterface;
+			InterfaceShapePayload castSharedPrimary = (InterfaceShapePayload)sharedHolder.primary;
+			InterfaceShapePayloadVariant castSharedSecondary = (InterfaceShapePayloadVariant)sharedHolder.secondary;
+
+			Validator.Set("InterfaceShapeHolderReady", "True");
+			Validator.Set("InterfaceShapeFieldNotNull", "True");
+			Validator.Set("InterfaceShapeConcreteValue", holder.asConcrete.payloadValue.ToString());
+			Validator.Set("InterfaceShapeConcreteLabel", holder.asConcrete.payloadLabel);
+			Validator.Set("InterfaceShapeCastValue", castFromHolder.payloadValue.ToString());
+			Validator.Set("InterfaceShapeRelayValue", relay.relayedConcrete.payloadValue.ToString());
+			Validator.Set("InterfaceShapeRelayLabel", castFromRelay.payloadLabel);
+			Validator.Set("InterfaceShapeSharedPrimaryValue", castSharedPrimary.payloadValue.ToString());
+			Validator.Set("InterfaceShapeSharedSecondaryValue", castSharedSecondary.payloadValue.ToString());
+			Validator.Set("InterfaceShapeSharedConcreteValue", sharedHolder.primaryConcrete.payloadValue.ToString());
+			Validator.Set("InterfaceShapeSharedVariantValue", sharedHolder.secondaryConcrete.payloadValue.ToString());
+			Validator.Set("InterfaceShapeSharedLabels", sharedHolder.primaryConcrete.payloadLabel + "|" + sharedHolder.secondaryConcrete.payloadLabel);
 		}
 
 		public void ReadInt(ref int field)
@@ -581,6 +641,233 @@ namespace TestCilbox
 	public class TestCilboxExceptConstructor
 	{
 		public TestCilboxExceptConstructor() { throw new Exception("Constructor Exception"); }
+	}
+
+	[Cilboxable]
+	public class DeepCtorLevel1
+	{
+		public DeepCtorLevel2 child;
+		public int levelValue;
+		public string checksum;
+
+		public DeepCtorLevel1(DeepCtorLevel2 child)
+		{
+			this.child = child;
+			levelValue = 101;
+			checksum = "L1:101|" + child.checksum;
+		}
+	}
+
+	[Cilboxable]
+	public class DeepCtorLevel2
+	{
+		public DeepCtorLevel3 child;
+		public int levelValue;
+		public string checksum;
+
+		public DeepCtorLevel2(DeepCtorLevel3 child)
+		{
+			this.child = child;
+			levelValue = 202;
+			checksum = "L2:202|" + child.checksum;
+		}
+	}
+
+	[Cilboxable]
+	public class DeepCtorLevel3
+	{
+		public DeepCtorLevel4 child;
+		public int levelValue;
+		public string checksum;
+
+		public DeepCtorLevel3(DeepCtorLevel4 child)
+		{
+			this.child = child;
+			levelValue = 303;
+			checksum = "L3:303|" + child.checksum;
+		}
+	}
+
+	[Cilboxable]
+	public class DeepCtorLevel4
+	{
+		public DeepCtorLevel5 child;
+		public int levelValue;
+		public string checksum;
+
+		public DeepCtorLevel4(DeepCtorLevel5 child)
+		{
+			this.child = child;
+			levelValue = 404;
+			checksum = "L4:404|" + child.checksum;
+		}
+	}
+
+	[Cilboxable]
+	public class DeepCtorLevel5
+	{
+		public DeepCtorLevel6 child;
+		public int levelValue;
+		public string checksum;
+
+		public DeepCtorLevel5(DeepCtorLevel6 child)
+		{
+			this.child = child;
+			levelValue = 505;
+			checksum = "L5:505|" + child.checksum;
+		}
+	}
+
+	[Cilboxable]
+	public class DeepCtorLevel6
+	{
+		public DeepCtorLevel7 child;
+		public int levelValue;
+		public string checksum;
+
+		public DeepCtorLevel6(DeepCtorLevel7 child)
+		{
+			this.child = child;
+			levelValue = 606;
+			checksum = "L6:606|" + child.checksum;
+		}
+	}
+
+	[Cilboxable]
+	public class DeepCtorLevel7
+	{
+		public DeepCtorLevel8 child;
+		public int levelValue;
+		public string checksum;
+
+		public DeepCtorLevel7(DeepCtorLevel8 child)
+		{
+			this.child = child;
+			levelValue = 707;
+			checksum = "L7:707|" + child.checksum;
+		}
+	}
+
+	[Cilboxable]
+	public class DeepCtorLevel8
+	{
+		public DeepCtorLevel9 child;
+		public int levelValue;
+		public string checksum;
+
+		public DeepCtorLevel8(DeepCtorLevel9 child)
+		{
+			this.child = child;
+			levelValue = 808;
+			checksum = "L8:808|" + child.checksum;
+		}
+	}
+
+	[Cilboxable]
+	public class DeepCtorLevel9
+	{
+		public DeepCtorLevel10 child;
+		public int levelValue;
+		public string checksum;
+
+		public DeepCtorLevel9(DeepCtorLevel10 child)
+		{
+			this.child = child;
+			levelValue = 909;
+			checksum = "L9:909|" + child.checksum;
+		}
+	}
+
+	[Cilboxable]
+	public class DeepCtorLevel10
+	{
+		public int levelValue;
+		public int leafValue;
+		public string checksum;
+
+		public DeepCtorLevel10()
+		{
+			levelValue = 1010;
+			leafValue = 424242;
+			checksum = "L10:1010";
+		}
+	}
+
+	[Cilboxable]
+	public interface IInterfaceShapePayload
+	{
+		int payloadValue { get; }
+		string payloadLabel { get; }
+	}
+
+	[Cilboxable]
+	public class InterfaceShapePayload : IInterfaceShapePayload
+	{
+		public int payloadValue { get; private set; }
+		public string payloadLabel { get; private set; }
+		public InterfaceShapePayload(int payloadValue, string payloadLabel)
+		{
+			this.payloadValue = payloadValue;
+			this.payloadLabel = payloadLabel;
+		}
+	}
+
+	[Cilboxable]
+	public class InterfaceShapePayloadVariant : IInterfaceShapePayload
+	{
+		public int payloadValue { get; private set; }
+		public string payloadLabel { get; private set; }
+
+		public InterfaceShapePayloadVariant(int payloadValue, string payloadLabel)
+		{
+			this.payloadValue = payloadValue;
+			this.payloadLabel = payloadLabel;
+		}
+	}
+
+	[Cilboxable]
+	public class InterfaceShapeHolder
+	{
+		public IInterfaceShapePayload asInterface;
+		public InterfaceShapePayload asConcrete;
+
+		public InterfaceShapeHolder(IInterfaceShapePayload payload)
+		{
+			asInterface = payload;
+			asConcrete = (InterfaceShapePayload)payload;
+		}
+	}
+
+	[Cilboxable]
+	public class InterfaceShapeSharedVariableHolder
+	{
+		public IInterfaceShapePayload primary;
+		public IInterfaceShapePayload secondary;
+		public InterfaceShapePayload primaryConcrete;
+		public InterfaceShapePayloadVariant secondaryConcrete;
+
+		public InterfaceShapeSharedVariableHolder(IInterfaceShapePayload primary, IInterfaceShapePayload secondary)
+		{
+			this.primary = primary;
+			this.secondary = secondary;
+			primaryConcrete = (InterfaceShapePayload)primary;
+			secondaryConcrete = (InterfaceShapePayloadVariant)secondary;
+		}
+	}
+
+	[Cilboxable]
+	public class InterfaceShapeRelay
+	{
+		public InterfaceShapeHolder holder;
+		public IInterfaceShapePayload relayedInterface;
+		public InterfaceShapePayload relayedConcrete;
+
+		public InterfaceShapeRelay(InterfaceShapeHolder holder)
+		{
+			this.holder = holder;
+			relayedInterface = holder.asInterface;
+			relayedConcrete = (InterfaceShapePayload)holder.asInterface;
+		}
 	}
 }
 
