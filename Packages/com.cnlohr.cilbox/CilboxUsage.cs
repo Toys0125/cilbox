@@ -451,7 +451,8 @@ namespace Cilbox
 			Serializee g;
 			if( ses.TryGetValue( "g", out g ) )
 			{
-				String ret = typeName + "`[";
+				String ret = ses.TryGetValue( "gn", out Serializee genericName ) ? genericName.AsString() : typeName;
+				ret += "[";
 				Serializee [] gs = g.AsArray();
 				for( int i = 0; i < gs.Length; i++ )
 					ret += (i==0?"":",") + GetNativeTypeNameFromSerializee( gs[i] );

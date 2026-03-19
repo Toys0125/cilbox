@@ -47,6 +47,7 @@ namespace TestCilbox
 			"System.MathF",
 			"System.NullReferenceException",
 			"System.Object",
+			"System.Nullable",
 			"System.Single",
 			"System.String",
 			"System.TimeSpan",
@@ -256,6 +257,26 @@ namespace TestCilbox
 		{
 			i = 42;
 		}
+
+		public static int? EchoNullableShort(int? value)
+		{
+			return value;
+		}
+
+		public static System.Nullable<int> EchoNullableLong(System.Nullable<int> value)
+		{
+			return value;
+		}
+
+		public static bool IsNullableShortNull(int? value)
+		{
+			return value == null;
+		}
+
+		public static bool IsNullableLongNull(System.Nullable<int> value)
+		{
+			return value == null;
+		}
 	}
 
 
@@ -455,6 +476,12 @@ namespace TestCilbox
 			Validator.Validate("JoinFloatArrayResized", "1.5, 2.5, 3.5, 4.5");
 			Validator.Validate("DictionaryKeys", "key1, key2");
 			Validator.Validate("ComplexGenericType", "String, Int32, Boolean, Char");
+			Validator.Validate("Nullable Short HasValue", "True");
+			Validator.Validate("Nullable Short Value", "42");
+			Validator.Validate("Nullable Short Null", "True");
+			Validator.Validate("Nullable Long HasValue", "True");
+			Validator.Validate("Nullable Long Value", "84");
+			Validator.Validate("Nullable Long Null", "True");
 
 			Validator.Validate("TestVec.x", "12");
 			Validator.Validate("TestVec.y", "8");

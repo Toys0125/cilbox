@@ -178,6 +178,16 @@ namespace TestCilbox
 			Outer<string>.Middle<int, bool>.Inner<char> complex = new();
 			Validator.Set("ComplexGenericType", complex.GetTypeNames());
 
+			int? nullableShort = TestUtil.EchoNullableShort(42);
+			Validator.Set("Nullable Short HasValue", nullableShort.HasValue.ToString());
+			Validator.Set("Nullable Short Value", nullableShort.GetValueOrDefault().ToString());
+			Validator.Set("Nullable Short Null", TestUtil.IsNullableShortNull(null).ToString());
+
+			System.Nullable<int> nullableLong = TestUtil.EchoNullableLong(84);
+			Validator.Set("Nullable Long HasValue", nullableLong.HasValue.ToString());
+			Validator.Set("Nullable Long Value", nullableLong.GetValueOrDefault().ToString());
+			Validator.Set("Nullable Long Null", TestUtil.IsNullableLongNull(null).ToString());
+
 			Vector3 testVec = new Vector3(7, 7, 7);
 			testVec.x += 5;
 			Validator.Set("TestVec.x", testVec.x.ToString() );

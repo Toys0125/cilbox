@@ -178,6 +178,13 @@ namespace Cilbox
 
 		public object CoerceToObject( Type t )
 		{
+			Type nullableUnderlying = Nullable.GetUnderlyingType( t );
+			if( nullableUnderlying != null )
+			{
+				if( type == StackType.Object && o == null ) return null;
+				return CoerceToObject( nullableUnderlying );
+			}
+
 			StackType rt = StackTypeFromType( t );
 
 			if( t.IsEnum && type < StackType.Object )

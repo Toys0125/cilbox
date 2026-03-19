@@ -29,6 +29,7 @@ namespace Cilbox
 			"System.MathF",
 			"System.Math",
 			"System.Object",
+			"System.Nullable",
 			"System.Single",
 			"System.String",
 			"System.TimeSpan",
