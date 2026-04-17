@@ -1,15 +1,11 @@
 using UnityEngine;
 using System;
-
-using System.Collections;
-using System.Collections.Specialized;
 using System.Collections.Generic;
 using System.Reflection;
 
 #if UNITY_EDITOR
 using Unity.Profiling;
 #endif
-using System.Text;
 
 namespace Cilbox
 {
@@ -17,6 +13,7 @@ namespace Cilbox
 	{
 		public StackElement [] fields;
 		public List< UnityEngine.Object > fieldsObjects;  // This is generally only held during saving and loading, not in use.
+		[NonSerialized] private List< UnityEngine.Object > runtimeFieldsObjects;
 
 		public CilboxClass cls;
 		public Cilbox box;
@@ -27,7 +24,6 @@ namespace Cilbox
 		public String initialLoadPath;
 
 		private bool proxyWasSetup = false;
-		private bool proxyLoadInProgress = false;
 
 		private void ProxyDebugLog( string message )
 		{
@@ -197,176 +193,160 @@ namespace Cilbox
 		{
 			//Debug.Log( "Runtime Proxy Load " + proxyWasSetup + " " + transform.name + " " + className );
 			if( proxyWasSetup ) return;
-			if( proxyLoadInProgress ) return;
 			if (box == null) return;
-			bool verboseLogging = false;
-			proxyLoadInProgress = true;
-
-			try
-			{
-				box.BoxInitialize(); // In case it is not yet initialized.
-				verboseLogging = box.verboseLogging;
+			box.BoxInitialize(); // In case it is not yet initialized.
+			bool verboseLogging = box.verboseLogging;
 
 #if UNITY_EDITOR
-				new ProfilerMarker( "Initialize " + className ).Auto();
+			new ProfilerMarker($"Initialize {className}").Auto();
 #endif
+            var sb = new System.Text.StringBuilder("/" + transform.name);
+            Transform aparent = transform.parent;
+            while (aparent != null)
+            {
+                sb.Insert(0, aparent.name).Insert(0, '/');
+                aparent = aparent.parent;
+            }
+            initialLoadPath = sb.ToString();
 
-				// Build initialLoadPath in O(n) — the old "/" + name + path concat was O(depth^2) per proxy.
-				{
-					Transform cur = transform;
-					List<string> parts = new List<string>(8);
-					while (cur != null)
-					{
-						parts.Add(cur.gameObject.name);
-						cur = cur.parent;
-					}
-					StringBuilder sb = new StringBuilder(64);
-					for (int i = parts.Count - 1; i >= 0; i--)
-						sb.Append('/').Append(parts[i]);
-					initialLoadPath = sb.ToString();
-				}
-
-				if( string.IsNullOrEmpty( className ) )
-				{
-					Debug.LogError( $"[CilboxProxy:{gameObject.name}] RuntimeProxyLoad aborted: class {className} was not found in Cilbox assembly data." );
-					return;
-				}
-
-				cls = box.GetClass( className );
-
-				// First thing: Go through any references that are prohibited.
-				for( int i = 0; i < fieldsObjects.Count; i++ )
-				{
-					UnityEngine.Object o = fieldsObjects[i];
-					if (o == null)
-					{
-						// If it's null, there's nothing to safety-check.
-						continue;
-					}
-					Type t = o.GetType();
-					if(box.GetComponentTypeOverride( t.FullName, out Type overrideType )) {
-						Debug.Log( $"RuntimeProxyLoad: Override {t.FullName} with {overrideType.FullName}" );
-						t = overrideType;
-						if(typeof(CilboxShim).IsAssignableFrom(t) && fieldsObjects[i] is Component gameObjectComponent)
-						{
-							GameObject gameObject = gameObjectComponent.gameObject;
-							Component component;
-							if(gameObject.TryGetComponent(t, out Component c)) {
-								component = c;
-							} else
-							{
-								component = gameObject.AddComponent(t);
-							}
-							fieldsObjects[i] = component;
-						}
-					}
-					if( t == typeof( CilboxProxy ) )
-					{
-						// If it's another cilbox proxy, it's OK.
-					}
-					else if( !box.CheckTypeAllowed( t.FullName ) )
-					{
-						Debug.LogWarning( $"Contraband found in script {className} field ID {i}: {o.GetType()}" );
-						fieldsObjects[i] = null;
-					}
-				}
-
-				// Populate fields[]
-				int fieldCount = cls.instanceFieldNames.Length;
-				fields = new StackElement[fieldCount];
-
-				Serializee [] d = new Serializee( Convert.FromBase64String( serializedObjectData ), Serializee.ElementType.Map ).AsArray();
-
-				Serializee [] matchingSerializeeInstanceField = new Serializee[fieldCount];
-				Dictionary< String, Serializee > [] matchingDicts = new Dictionary< String, Serializee >[fieldCount];
-				foreach( Serializee s in d )
-				{
-					// Go over the root objects, to see which ones slot in and how.
-					// Cache the parsed dict so the load pass below doesn't reparse.
-					Dictionary< String, Serializee > dict = s.AsMap();
-					if( dict.ContainsKey( "t" ) && dict.TryGetValue( "miid", out Serializee miid ) )
-					{
-						if( UInt32.TryParse( miid.AsString(), out UInt32 nMIID ) &&
-							nMIID < fieldCount )
-						{
-							matchingSerializeeInstanceField[nMIID] = s;
-							matchingDicts[nMIID] = dict;
-						}
-					}
-				}
-
-				// Preinitialize every field to its CLR default value so that non-serialized fields
-				// (especially UnityEngine.Object references) are not left as implicit StackType.Boolean.
-				for( int i = 0; i < fieldCount; i++ )
-				{
-					Type fieldType = cls.instanceFieldTypes[i];
-					// Maybe need to GetComponentTypeOverride here as well?  Maybe not, since that should only be for actual UnityEngine.Objects, which should be null at this point if they are contraband.
-					if( fieldType == null )
-					{
-						fields[i].LoadObject( null );
-						continue;
-					}
-					StackType st = StackElement.StackTypeFromType( fieldType );
-					if( st < StackType.Object )
-					{
-						fields[i].type = st;
-						if (verboseLogging)
-							ProxyDebugLog( $"Default field init {cls.instanceFieldNames[i]} <- default({fieldType})" );
-					}
-					else if( fieldType.IsValueType )
-					{
-						try
-						{
-							// We clean the fieldtype before https://github.com/cnlohr/cilbox/blob/fc608341d293186e0aacf519ea9f0beb43d42cee/Packages/com.cnlohr.cilbox/Cilbox.cs#L1389C40-L1389C67
-							object defaultValue = Activator.CreateInstance( fieldType );
-							fields[i].LoadObject( defaultValue );
-							if (verboseLogging)
-								ProxyDebugLog( $"Default field init {cls.instanceFieldNames[i]} <- default({fieldType}) [boxed]" );
-						}
-						catch( Exception e )
-						{
-							fields[i].LoadObject( null );
-							Debug.LogWarning( $"[CilboxProxy:{gameObject.name}] Failed to create default value for {cls.instanceFieldNames[i]} ({fieldType}): {e.Message}" );
-						}
-					}
-					else
-					{
-						fields[i].LoadObject( null );
-						if (verboseLogging)
-							ProxyDebugLog( $"Default field init {cls.instanceFieldNames[i]} <- null" );
-					}
-				}
-
-				// Call interpreted constructor.
-				box.InterpretIID( cls, this, ImportFunctionID.dotCtor, null );
-
-				// load serialized fields.
-				for( int i = 0; i < fieldCount; i++ )
-				{
-					Serializee s = matchingSerializeeInstanceField[i];
-
-					if( s == null ) { /* Debug.Log( $"Skipping {i} {cls.instanceFieldNames[i]}" ); */ continue; }
-
-					object o;
-					bool bIsObject = LoadObjectFromSerializee( s, out o, cls.instanceFieldNames[i], cls.instanceFieldTypes[i], true, matchingDicts[i] );
-					if( bIsObject )
-						fields[i].LoadObject( o );
-					else
-						fields[i].Load( o );
-				}
-
-				proxyWasSetup = true;
-				// Release the serialized blob and original object list — they're only needed during load
-				// and the proxyWasSetup guard above prevents re-entry. Keeps ~a kB per proxy off the GC heap.
-				serializedObjectData = null;
-				fieldsObjects = null;
-				if (verboseLogging)
-					Debug.Log( $"RuntimeProxyLoad complete for class {className}" );
-			}
-			finally
+            Debug.Log($"initialLoadPath {initialLoadPath}");
+            if (string.IsNullOrEmpty(className))
 			{
-				proxyLoadInProgress = false;
+				Debug.LogError( $"[CilboxProxy:{gameObject.name}] RuntimeProxyLoad aborted: class {className} was not found in Cilbox assembly data." );
+				return;
 			}
+
+			cls = box.GetClass( className );
+
+			runtimeFieldsObjects = fieldsObjects != null ? new List<UnityEngine.Object>(fieldsObjects) : new List<UnityEngine.Object>();
+
+			// First thing: Go through any references that are prohibited.
+			for( int i = 0; i < runtimeFieldsObjects.Count; i++ )
+			{
+				UnityEngine.Object o = runtimeFieldsObjects[i];
+				if (o == null)
+				{
+					// If it's null, there's nothing to safety-check.
+					continue;
+				}
+				Type t = o.GetType();
+				if(box.GetTypeOverride( t.FullName, out Type overrideType )) {
+					Debug.Log( $"RuntimeProxyLoad: Override {t.FullName} with {overrideType.FullName}" );
+					t = overrideType;
+					if(typeof(CilboxShim).IsAssignableFrom(t) && runtimeFieldsObjects[i] is Component gameObjectComponent)
+					{
+						GameObject gameObject = gameObjectComponent.gameObject;
+						Component component;
+						if(gameObject.TryGetComponent(t, out Component c)) {
+							component = c;
+						} else
+						{
+							component = gameObject.AddComponent(t);
+						}
+						runtimeFieldsObjects[i] = component;
+					}
+				}
+				if( t == typeof( CilboxProxy ) )
+				{
+					// If it's another cilbox proxy, it's OK.
+				}
+				else if( !box.CheckTypeAllowed( t.FullName ) )
+				{
+					Debug.LogWarning( $"Contraband found in script {className} field ID {i}: {o.GetType()}" );
+					runtimeFieldsObjects[i] = null;
+				}
+			}
+
+			// Populate fields[]
+			int fieldCount = cls.instanceFieldNames.Length;
+			fields = new StackElement[fieldCount];
+
+			Serializee [] d = new Serializee( Convert.FromBase64String( serializedObjectData ), Serializee.ElementType.Map ).AsArray();
+
+			Serializee [] matchingSerializeeInstanceField = new Serializee[fieldCount];
+			Dictionary< String, Serializee > [] matchingDicts = new Dictionary< String, Serializee >[fieldCount];
+			foreach( Serializee s in d )
+			{
+				// Go over the root objects, to see which ones slot in and how.
+				// Cache the parsed dict so the load pass below doesn't reparse.
+				Dictionary< String, Serializee > dict = s.AsMap();
+				if( dict.ContainsKey( "t" ) && dict.TryGetValue( "miid", out Serializee miid ) )
+				{
+					if( UInt32.TryParse( miid.AsString(), out UInt32 nMIID ) &&
+						nMIID < fieldCount )
+					{
+						matchingSerializeeInstanceField[nMIID] = s;
+						matchingDicts[nMIID] = dict;
+					}
+				}
+			}
+
+			// Preinitialize every field to its CLR default value so that non-serialized fields
+			// (especially UnityEngine.Object references) are not left as implicit StackType.Boolean.
+			for( int i = 0; i < fieldCount; i++ )
+			{
+				Type fieldType = cls.instanceFieldTypes[i];
+				// Maybe need to GetComponentTypeOverride here as well?  Maybe not, since that should only be for actual UnityEngine.Objects, which should be null at this point if they are contraband.
+				if( fieldType == null )
+				{
+					fields[i].LoadObject( null );
+					continue;
+				}
+				StackType st = StackElement.StackTypeFromType( fieldType );
+				if( st < StackType.Object )
+				{
+					fields[i].type = st;
+					if (verboseLogging)
+						ProxyDebugLog( $"Default field init {cls.instanceFieldNames[i]} <- default({fieldType})" );
+				}
+				else if( fieldType.IsValueType )
+				{
+					try
+					{
+						// We clean the fieldtype before https://github.com/cnlohr/cilbox/blob/fc608341d293186e0aacf519ea9f0beb43d42cee/Packages/com.cnlohr.cilbox/Cilbox.cs#L1389C40-L1389C67
+						object defaultValue = Activator.CreateInstance( fieldType );
+						fields[i].LoadObject( defaultValue );
+						if (verboseLogging)
+							ProxyDebugLog( $"Default field init {cls.instanceFieldNames[i]} <- default({fieldType}) [boxed]" );
+					}
+					catch( Exception e )
+					{
+						fields[i].LoadObject( null );
+						Debug.LogWarning( $"[CilboxProxy:{gameObject.name}] Failed to create default value for {cls.instanceFieldNames[i]} ({fieldType}): {e.Message}" );
+					}
+				}
+				else
+				{
+					fields[i].LoadObject( null );
+					if (verboseLogging)
+						ProxyDebugLog( $"Default field init {cls.instanceFieldNames[i]} <- null" );
+				}
+			}
+
+			// Call interpreted constructor.
+			box.InterpretIID( cls, this, ImportFunctionID.dotCtor, null );
+
+			// load serialized fields.
+			for( int i = 0; i < fieldCount; i++ )
+			{
+				Serializee s = matchingSerializeeInstanceField[i];
+
+				if( s == null ) { /* Debug.Log( $"Skipping {i} {cls.instanceFieldNames[i]}" ); */ continue; }
+
+				object o;
+				bool bIsObject = LoadObjectFromSerializee( s, out o, cls.instanceFieldNames[i], cls.instanceFieldTypes[i], true, matchingDicts[i] );
+				if( bIsObject )
+					fields[i].LoadObject( o );
+				else
+					fields[i].Load( o );
+			}
+
+
+			proxyWasSetup = true;
+			runtimeFieldsObjects = null;
+			serializedObjectData = null;
+			if (verboseLogging)
+				Debug.Log( $"RuntimeProxyLoad complete for class {className}" );
 		}
 
 
@@ -374,6 +354,7 @@ namespace Cilbox
 		// `dict` may be supplied by callers that already parsed the Serializee to avoid a redundant AsMap allocation.
 		private bool LoadObjectFromSerializee( Serializee s, out object oOut, String rootFieldName, Type inType, bool root, Dictionary< String, Serializee > dict = null )
 		{
+			List<UnityEngine.Object> objectSlots = runtimeFieldsObjects ?? fieldsObjects;
 			if( dict == null ) dict = s.AsMap();
 
 			Serializee setype;
@@ -386,7 +367,8 @@ namespace Cilbox
 					int iFO;
 					if( dict.TryGetValue( "fo", out seFO ) &&
 						Int32.TryParse( seFO.AsString(), out iFO ) &&
-						iFO < fieldsObjects.Count )
+						objectSlots != null &&
+						iFO < objectSlots.Count )
 					{
 						if (dict.TryGetValue("or", out var seOr))
 						{
@@ -398,7 +380,7 @@ namespace Cilbox
 							}
 						}
 
-						UnityEngine.Object o = fieldsObjects[iFO];
+						UnityEngine.Object o = objectSlots[iFO];
 
 						//Debug.Log( $"LOADING FIELD: {i} with {o}" );
 						if( o )
@@ -409,7 +391,7 @@ namespace Cilbox
 							oOut = o;
 
 							// Remove reference out of the fieldsObjects array.
-							fieldsObjects[iFO] = null;
+							objectSlots[iFO] = null;
 
 							return true;
 						}
@@ -417,7 +399,8 @@ namespace Cilbox
 					}
 					else
 					{
-						Debug.LogWarning( $"Failure to load object in field id:{rootFieldName} of {className} (slot parse failed or out of range, fieldsObjects count={fieldsObjects.Count})");
+						int objectSlotCount = objectSlots != null ? objectSlots.Count : 0;
+						Debug.LogWarning( $"Failure to load object in field id:{rootFieldName} of {className} (slot parse failed or out of range, fieldsObjects count={objectSlotCount})");
 					}
 				}
 				else if( sT[0] == 'a' )
