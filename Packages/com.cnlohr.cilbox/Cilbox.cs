@@ -1223,6 +1223,30 @@ spiperf.Begin();
 						}
 						break;
 					}
+					case 0x81: // stobj
+					{
+						uint typeToken = BytecodeAsU32( ref pc );
+						CilMetadataTokenInfo stobjMeta = box.metadatas[typeToken];
+						StackElement value = stackBuffer[sp--];
+						StackElement addr = stackBuffer[sp--];
+						object obj = ( stobjMeta.nativeType != null && value.type < StackType.Object ) ?
+							value.CoerceToObject( stobjMeta.nativeType ) :
+							value.AsObject( box );
+
+						if( addr.type == StackType.Address )
+						{
+							addr.DereferenceLoadAddress( obj );
+						}
+						else if( addr.type == StackType.NativeHandle )
+						{
+							addr.DereferenceLoadNativeHandle( box, obj );
+						}
+						else
+						{
+							throw new CilboxInterpreterRuntimeException("Invalid stack type for stobj instruction", parentClass.className, methodName, pc);
+						}
+						break;
+					}
 					case 0x8C: // box (This pulls off a type)
 					{
 						uint otyp = BytecodeAsU32( ref pc );
@@ -1374,22 +1398,40 @@ spiperf.Begin();
 							interpretedThrow(pc - 1, new NullReferenceException());
 							break;
 						}
-						object [] array = (object[])arrSE.AsObject();
+						Array array = (Array)arrSE.AsObject();
 						if (index < 0 || index >= array.Length)
 						{
 							interpretedThrow(pc - 1, new IndexOutOfRangeException());
 							break;
 						}
 						CilMetadataTokenInfo elemMeta = box.metadatas[otyp];
+						object value;
 						if( elemMeta.nativeTypeIsCilboxProxy || elemMeta.nativeType == null )
 						{
 							// This actually gets the value in valSE, and converts it to the int/float/native handle, etc. based on "this" box.
-							array[index] = valSE.AsObject( box );
+							value = valSE.AsObject( box );
 						}
 						else
 						{
-							array[index] = Convert.ChangeType( valSE.AsObject(), elemMeta.nativeType );  // This shouldn't be type changing.s
+							value = valSE.AsObject();
 						}
+
+						Type targetElementType = array.GetType().GetElementType();
+						if( targetElementType != null && targetElementType != typeof(object) && value != null && !targetElementType.IsInstanceOfType( value ) )
+						{
+							if( targetElementType.IsEnum )
+							{
+								value = Enum.ToObject( targetElementType, value );
+							}
+							else
+							{
+								if( value.GetType().IsEnum )
+									value = Convert.ChangeType( value, Enum.GetUnderlyingType( value.GetType() ) );
+								value = Convert.ChangeType( value, targetElementType );
+							}
+						}
+
+						array.SetValue( value, index );
 						break;
 					}
 					case 0xA5: // unbox.any
