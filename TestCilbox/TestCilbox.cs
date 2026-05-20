@@ -482,11 +482,13 @@ namespace TestCilbox
 			Validator.Validate( "Cilbox disabled after timeout", "False" );
 			Validator.ValidateCount($"CilboxDisabled_{cb.GetType().FullName}", 0 );
 			Validator.ValidateCount($"CilboxPaused_{cb.GetType().FullName}", 1 );
-
+			
+			// We should be in a paused state so Fixed Update doesn't change the value until next cycle.
 			Validator.Set( "Execution after timeout", "paused" );
 			proxy.GetType().GetMethod("FixedUpdate",BindingFlags.Instance|BindingFlags.NonPublic,Type.EmptyTypes).Invoke( proxy, new object[0] );
 			Validator.Validate( "Execution after timeout", "paused" );
 
+			// Force check that Update only gets called once, even while invoked multiple times.
 			MethodInfo boxUpdate = typeof(Cilbox.Cilbox).GetMethod("Update", BindingFlags.Instance|BindingFlags.NonPublic, Type.EmptyTypes);
 			for( int i = 0; i < 200 && cb.HasPendingWork; i++ )
 			{
@@ -496,6 +498,7 @@ namespace TestCilbox
 			Validator.Set( "Cilbox paused after resume", cb.IsPaused.ToString() );
 			Validator.Validate( "Cilbox finished pending work", "False" );
 			Validator.Validate( "Cilbox paused after resume", "False" );
+			// Check if the Update loop finished its for loop before reaching here
 			Validator.Validate( "Overtime", "did not timed out" );
 			Validator.Set( "Cilbox resumed after timeout", (Validator.GetCount($"CilboxResumed_{cb.GetType().FullName}") > 0).ToString() );
 			Validator.Validate( "Cilbox resumed after timeout", "True" );
