@@ -47,6 +47,95 @@ namespace Cilbox
 		public StackElement[] fields;
 	}
 
+	public enum CilboxExecutionStatus
+	{
+		Running,
+		Completed,
+		Faulted
+	}
+
+	public class CilboxExecutionFrame
+	{
+		public CilboxMethod method;
+		public StackElement[] evalAndLocals;
+		public int evalAndLocalsOffset;
+		public int evalAndLocalsCount;
+		public StackElement[] parameters;
+		public int parametersOffset;
+		public int parametersCount;
+		public int pc;
+		public int sp = -1;
+		public Stack<int> handlerDestinations;
+		public StackElement? exceptionRegister;
+		public CilMetadataTokenInfo constrainedMeta;
+		public bool hasStarted;
+
+		public bool awaitingChildReturn;
+		public bool awaitingChildPushReturn;
+		public bool awaitingChildPushObject;
+		public bool awaitingChildIsJmp;
+		public object awaitingChildObject;
+		public bool forceReturn;
+
+		public void ApplyChildReturn( StackElement childReturn )
+		{
+			if( !awaitingChildReturn ) return;
+
+			if( awaitingChildPushObject )
+			{
+				evalAndLocals[evalAndLocalsOffset + ++sp].LoadObject( awaitingChildObject );
+			}
+			else if( awaitingChildPushReturn )
+			{
+				evalAndLocals[evalAndLocalsOffset + ++sp] = childReturn;
+			}
+
+			if( awaitingChildIsJmp )
+			{
+				if( !awaitingChildPushObject && !awaitingChildPushReturn )
+					evalAndLocals[evalAndLocalsOffset + ++sp] = StackElement.nil;
+				forceReturn = true;
+			}
+
+			awaitingChildReturn = false;
+			awaitingChildPushReturn = false;
+			awaitingChildPushObject = false;
+			awaitingChildIsJmp = false;
+			awaitingChildObject = null;
+		}
+	}
+
+	public class CilboxExecutionContext
+	{
+		public CilboxProxy rootProxy;
+		public CilboxClass rootClass;
+		public ImportFunctionID rootImportFunction;
+		public List<CilboxExecutionFrame> frames = new List<CilboxExecutionFrame>();
+		public StackElement finalReturnValue = StackElement.nil;
+		public CilboxExecutionStatus status = CilboxExecutionStatus.Running;
+		public string pauseReason = "";
+	}
+
+	internal class PendingProxyInvocation
+	{
+		public CilboxProxy proxy;
+		public CilboxClass cls;
+		public ImportFunctionID iid;
+		public object[] parameters;
+	}
+
+	internal class CilboxInterpreterPausedException : CilboxException
+	{
+		public readonly string Reason;
+		public readonly List<CilboxExecutionFrame> Frames;
+
+		public CilboxInterpreterPausedException( string reason, List<CilboxExecutionFrame> frames ) : base( reason )
+		{
+			Reason = reason;
+			Frames = frames;
+		}
+	}
+
 	public class CilboxMethod
 	{
 		public CilboxClass parentClass;
@@ -168,32 +257,44 @@ namespace Cilbox
 
 		}
 
-		public object Interpret( CilboxProxy ths, object [] parametersIn )
+		public CilboxExecutionFrame CreateFrame( CilboxProxy ths, object [] parametersIn )
 		{
 			int plen = parametersIn?.Length ?? 0;
 			int thisOffset = isStatic ? 0 : 1;
 
-			StackElement [] parameters = new StackElement[plen+thisOffset];
-			StackElement [] stackBuffer = new StackElement[Cilbox.defaultStackSize];
+			CilboxExecutionFrame frame = new CilboxExecutionFrame();
+			frame.method = this;
+			frame.parameters = new StackElement[plen+thisOffset];
+			frame.evalAndLocals = new StackElement[Cilbox.defaultStackSize];
+			frame.parametersOffset = 0;
+			frame.parametersCount = frame.parameters.Length;
+			frame.evalAndLocalsOffset = 0;
+			frame.evalAndLocalsCount = frame.evalAndLocals.Length;
 
 			if( isStatic )
 			{
 				for( int p = 0; p < plen; p++ )
-					parameters[p].Load( parametersIn[p] );
+					frame.parameters[p].Load( parametersIn[p] );
 			}
 			else
 			{
-				parameters[0].Load( ths );
+				frame.parameters[0].Load( ths );
 				for( int p = 0; p < plen; p++ )
-					parameters[p+1].Load( parametersIn[p] );
-				plen++;
+					frame.parameters[p+1].Load( parametersIn[p] );
 			}
+
+			return frame;
+		}
+
+		public object Interpret( CilboxProxy ths, object [] parametersIn )
+		{
+			CilboxExecutionFrame frame = CreateFrame( ths, parametersIn );
 
 			object ret = null;
 			if( !parentClass.box.InterpreterEntry(this) ) return null;
 			try
 			{
-				ret = InterpretInner( stackBuffer, parameters ).AsObject();
+				ret = InterpretInner( frame ).AsObject();
 			}
 			catch( Exception e )
 			{
@@ -216,11 +317,47 @@ namespace Cilbox
 			return ret;
 		}
 
+		internal StackElement InterpretFrame( CilboxExecutionFrame frame )
+		{
+			return InterpretInner( frame );
+		}
+
+		private StackElement InterpretInner( CilboxExecutionFrame frame )
+		{
+			return InterpretInner(
+				frame.evalAndLocals,
+				frame.evalAndLocalsOffset,
+				frame.evalAndLocalsCount,
+				frame.parameters,
+				frame.parametersOffset,
+				frame.parametersCount,
+				frame );
+		}
+
 		private StackElement InterpretInner( ArraySegment<StackElement> stackBufferIn, ArraySegment<StackElement> parametersIn )
 		{
-			Span<StackElement> stackBuffer = stackBufferIn.AsSpan();
-			Span<StackElement> parameters = parametersIn.AsSpan();
-			Stack<int> handlerClauseStack = null; // don't allocate unless necessary
+			return InterpretInner(
+				stackBufferIn.Array,
+				stackBufferIn.Offset,
+				stackBufferIn.Count,
+				parametersIn.Array,
+				parametersIn.Offset,
+				parametersIn.Count,
+				null );
+		}
+
+		private StackElement InterpretInner(
+			StackElement[] stackBufferArray,
+			int stackBufferOffset,
+			int stackBufferCount,
+			StackElement[] parametersArray,
+			int parametersOffset,
+			int parametersCount,
+			CilboxExecutionFrame resumeFrame )
+		{
+			Span<StackElement> stackBuffer = stackBufferArray.AsSpan( stackBufferOffset, stackBufferCount );
+			Span<StackElement> parameters = parametersArray.AsSpan( parametersOffset, parametersCount );
+			Stack<int> handlerClauseStack = resumeFrame?.handlerDestinations; // don't allocate unless necessary
 
 #if UNITY_EDITOR
 			perfMarkerInterpret.Begin();
@@ -230,7 +367,7 @@ namespace Cilbox
 
 			int localVarsHead = MaxStackSize;
 			int stackContinues = localVarsHead + methodLocals.Length;
-			StackElement? exceptionRegister = null;
+			StackElement? exceptionRegister = resumeFrame?.exceptionRegister;
 
 			// Uncomment for debugging.
 #if false
@@ -245,10 +382,19 @@ namespace Cilbox
 				bDeepDebug = true;
 			}
 #endif
-			int sp = -1;
+			int sp = resumeFrame?.sp ?? -1;
 			bool cont = true;
-			int pc = 0;
-			CilMetadataTokenInfo constrainedMeta = null;
+			int pc = resumeFrame?.pc ?? 0;
+			CilMetadataTokenInfo constrainedMeta = resumeFrame?.constrainedMeta;
+			if( resumeFrame != null )
+			{
+				if( resumeFrame.forceReturn )
+				{
+					resumeFrame.forceReturn = false;
+					return ( sp == -1 ) ? StackElement.nil : stackBuffer[sp--];
+				}
+				resumeFrame.hasStarted = true;
+			}
 			try
 			{
 				do
@@ -266,7 +412,8 @@ namespace Cilbox
 						{
 							box.interpreterAccountingCumulitiveTicks = now + box.timeoutLengthUs * box.interpreterTicksInUs - box.interpreterAccountingDropDead;
 							cont = false;
-							throw new CilboxInterpreterTimeoutException( "Script time resources overutilized (Timeout Us: " + box.interpreterAccountingCumulitiveTicks / box.interpreterTicksInUs + "/" + box.timeoutLengthUs + " )", parentClass.className, methodName, pc);
+							string reason = "Script time resources overutilized (Timeout Us: " + box.interpreterAccountingCumulitiveTicks / box.interpreterTicksInUs + "/" + box.timeoutLengthUs + " )";
+							throw new CilboxInterpreterPausedException( reason, new List<CilboxExecutionFrame>() { CaptureFrame() } );
 						}
 					}
 
@@ -307,12 +454,12 @@ spiperf.Begin();
 					case 0x0c: stackBuffer[localVarsHead+2] = stackBuffer[sp--]; break; //stloc.2
 					case 0x0d: stackBuffer[localVarsHead+3] = stackBuffer[sp--]; break; //stloc.3
 					case 0x0e: stackBuffer[++sp] = parameters[byteCode[pc++]]; break; // ldarg.s <uint8 (argNum)>
-					case 0x0f: stackBuffer[++sp] = StackElement.CreateAddressReference( parametersIn.Array, (uint)parametersIn.Offset + (uint)byteCode[pc++] ); break; // ldarga.s <uint8 (argNum)>
+					case 0x0f: stackBuffer[++sp] = StackElement.CreateAddressReference( parametersArray, (uint)parametersOffset + (uint)byteCode[pc++] ); break; // ldarga.s <uint8 (argNum)>
 					case 0x11: stackBuffer[++sp] = stackBuffer[localVarsHead+byteCode[pc++]]; break; //ldloc.s
 					case 0x12:
 					{
 						uint whichLocal = byteCode[pc++];
-						stackBuffer[++sp] = StackElement.CreateAddressReference( stackBufferIn.Array, (uint)(localVarsHead+whichLocal+stackBufferIn.Offset) );
+						stackBuffer[++sp] = StackElement.CreateAddressReference( stackBufferArray, (uint)(localVarsHead+whichLocal+stackBufferOffset) );
 						break; //ldloca.s // Load address of local variable.
 					}
 					case 0x13: stackBuffer[localVarsHead+byteCode[pc++]] = stackBuffer[sp--]; break; //stloc.s
@@ -373,9 +520,15 @@ spiperf.Begin();
 									stackBuffer[nextParameterStart] = stackBuffer[sp--];
 
 								if( !isVoid )
-									stackBuffer[++sp] = dt.shim( dt, stackBufferIn.Slice( nextStackHead ), stackBufferIn.Slice( nextParameterStart, numParams + staticOffset ) );
+									stackBuffer[++sp] = dt.shim(
+										dt,
+										new ArraySegment<StackElement>( stackBufferArray, stackBufferOffset + nextStackHead, stackBufferCount - nextStackHead ),
+										new ArraySegment<StackElement>( stackBufferArray, stackBufferOffset + nextParameterStart, numParams + staticOffset ) );
 								else
-									dt.shim( dt, stackBufferIn.Slice( nextStackHead ), stackBufferIn.Slice( nextParameterStart, numParams + staticOffset ) );
+									dt.shim(
+										dt,
+										new ArraySegment<StackElement>( stackBufferArray, stackBufferOffset + nextStackHead, stackBufferCount - nextStackHead ),
+										new ArraySegment<StackElement>( stackBufferArray, stackBufferOffset + nextParameterStart, numParams + staticOffset ) );
 							}
 							else
 							{
@@ -404,7 +557,25 @@ spiperf.Begin();
 									stackBuffer[nextParameterStart].LoadObject( newObj );
 									try
 									{
-										targetMethod.InterpretInner(stackBufferIn.Slice(nextStackHead), stackBufferIn.Slice(nextParameterStart, numParams + staticOffset));
+										targetMethod.InterpretInner(
+											stackBufferArray,
+											stackBufferOffset + nextStackHead,
+											stackBufferCount - nextStackHead,
+											stackBufferArray,
+											stackBufferOffset + nextParameterStart,
+											numParams + staticOffset,
+											null );
+									}
+									catch (CilboxInterpreterPausedException e)
+									{
+										CilboxExecutionFrame parentFrame = CaptureFrame();
+										parentFrame.awaitingChildReturn = true;
+										parentFrame.awaitingChildPushReturn = false;
+										parentFrame.awaitingChildPushObject = true;
+										parentFrame.awaitingChildObject = newObj;
+										parentFrame.awaitingChildIsJmp = isJmp;
+										e.Frames.Insert(0, parentFrame);
+										throw;
 									}
 									catch (CilboxUnhandledInterpretedException e)
 									{
@@ -420,9 +591,33 @@ spiperf.Begin();
 									try
 									{
 										if (!isVoid && !ctorAsCall)
-											stackBuffer[++sp] = targetMethod.InterpretInner(stackBufferIn.Slice(nextStackHead), stackBufferIn.Slice(nextParameterStart, numParams + staticOffset));
+											stackBuffer[++sp] = targetMethod.InterpretInner(
+												stackBufferArray,
+												stackBufferOffset + nextStackHead,
+												stackBufferCount - nextStackHead,
+												stackBufferArray,
+												stackBufferOffset + nextParameterStart,
+												numParams + staticOffset,
+												null );
 										else
-											targetMethod.InterpretInner(stackBufferIn.Slice(nextStackHead), stackBufferIn.Slice(nextParameterStart, numParams + staticOffset));
+											targetMethod.InterpretInner(
+												stackBufferArray,
+												stackBufferOffset + nextStackHead,
+												stackBufferCount - nextStackHead,
+												stackBufferArray,
+												stackBufferOffset + nextParameterStart,
+												numParams + staticOffset,
+												null );
+									}
+									catch (CilboxInterpreterPausedException e)
+									{
+										CilboxExecutionFrame parentFrame = CaptureFrame();
+										parentFrame.awaitingChildReturn = true;
+										parentFrame.awaitingChildPushReturn = !isVoid && !ctorAsCall;
+										parentFrame.awaitingChildPushObject = false;
+										parentFrame.awaitingChildIsJmp = isJmp;
+										e.Frames.Insert(0, parentFrame);
+										throw;
 									}
 									catch (CilboxUnhandledInterpretedException e)
 									{
@@ -1597,6 +1792,10 @@ spiperf.End();
 				// don't break program flow for interpreted exceptions; we want to pass flow back to the outer call.
 				throw;
 			}
+			catch (CilboxInterpreterPausedException)
+			{
+				throw;
+			}
 			catch( Exception e )
 			{
 				string fullError = $"Breakwarn: {e.ToString()} Class: {parentClass.className}, Function: {methodName}, Bytecode: {pc}";
@@ -1616,6 +1815,25 @@ spiperf.End();
 			//box.InterpreterExit();
 
 			return ( sp == -1 ) ? StackElement.nil : stackBuffer[sp--];
+
+			CilboxExecutionFrame CaptureFrame()
+			{
+				CilboxExecutionFrame frame = resumeFrame ?? new CilboxExecutionFrame();
+				frame.method = this;
+				frame.evalAndLocals = stackBufferArray;
+				frame.evalAndLocalsOffset = stackBufferOffset;
+				frame.evalAndLocalsCount = stackBufferCount;
+				frame.parameters = parametersArray;
+				frame.parametersOffset = parametersOffset;
+				frame.parametersCount = parametersCount;
+				frame.pc = pc;
+				frame.sp = sp;
+				frame.handlerDestinations = handlerClauseStack;
+				frame.exceptionRegister = exceptionRegister;
+				frame.constrainedMeta = constrainedMeta;
+				frame.hasStarted = true;
+				return frame;
+			}
 
 			object CreateDefaultValueForType( CilMetadataTokenInfo typeMeta )
 			{
@@ -1810,7 +2028,7 @@ spiperf.End();
 				{
 					if (ehc.Flags == ExceptionHandlingClauseOptions.Clause && exceptionRegister.HasValue)
 					{
-						stackBufferIn.AsSpan()[++sp] = exceptionRegister.Value;
+						stackBufferArray[stackBufferOffset + ++sp] = exceptionRegister.Value;
 						exceptionRegister = null;
 					}
 				}
@@ -2060,6 +2278,17 @@ spiperf.End();
 
 		public String disabledReason = "";
 		public bool disabled = false;
+		private CilboxExecutionContext activeExecutionContext;
+		private readonly Queue<PendingProxyInvocation> pendingInvocations = new Queue<PendingProxyInvocation>();
+		private bool pendingUpdateQueued = false;
+		private bool pendingFixedUpdateQueued = false;
+		private bool paused = false;
+		private string pausedReason = "";
+		private bool runningScheduler = false;
+
+		public bool IsPaused => paused;
+		public string PausedReason => pausedReason;
+		public bool HasPendingWork => activeExecutionContext != null || pendingInvocations.Count > 0;
 
 		[SerializeField][FormerlySerializedAs("timeoutLengthUs")] private long desiredTimeoutLengthUs = 500000; // 500ms Can be changed by specific Cilbox instance.
 		public long timeoutLengthUs
@@ -2092,6 +2321,12 @@ spiperf.End();
 		public delegate void CilboxDisabledEvent( Cilbox box, string reason );
 
 		public static CilboxDisabledEvent OnCilboxDisabled;
+
+		public delegate void CilboxPausedEvent( Cilbox box, string reason );
+		public static CilboxPausedEvent OnCilboxPaused;
+
+		public delegate void CilboxResumedEvent( Cilbox box );
+		public static CilboxResumedEvent OnCilboxResumed;
 
 		public void ForceReinit()
 		{
@@ -2402,9 +2637,146 @@ spiperf.End();
 			uint index = cls.importFunctionToId[(uint)iid];
 			if( index == 0xffffffff ) return null;
 
-			object ret = cls.methods[index].Interpret( ths, parameters );
+			DispatchProxyInvocation( cls, ths, iid, parameters );
+			return null;
+		}
 
-			return ret;
+		public void DispatchProxyInvocation( CilboxClass cls, CilboxProxy ths, ImportFunctionID iid, object [] parameters )
+		{
+			if( cls == null || disabled ) return;
+			uint index = cls.importFunctionToId[(uint)iid];
+			if( index == 0xffffffff ) return;
+
+			if( activeExecutionContext != null || runningScheduler )
+			{
+				EnqueueProxyInvocation( cls, ths, iid, parameters );
+				return;
+			}
+
+			activeExecutionContext = CreateExecutionContext( cls, ths, iid, parameters );
+			RunScheduledWork();
+		}
+
+		private void EnqueueProxyInvocation( CilboxClass cls, CilboxProxy ths, ImportFunctionID iid, object [] parameters )
+		{
+			if( iid == ImportFunctionID.Update )
+			{
+				if( pendingUpdateQueued ) return;
+				pendingUpdateQueued = true;
+			}
+			else if( iid == ImportFunctionID.FixedUpdate )
+			{
+				if( pendingFixedUpdateQueued ) return;
+				pendingFixedUpdateQueued = true;
+			}
+
+			pendingInvocations.Enqueue( new PendingProxyInvocation()
+			{
+				cls = cls,
+				proxy = ths,
+				iid = iid,
+				parameters = parameters
+			} );
+		}
+
+		private CilboxExecutionContext CreateExecutionContext( CilboxClass cls, CilboxProxy ths, ImportFunctionID iid, object [] parameters )
+		{
+			uint index = cls.importFunctionToId[(uint)iid];
+			CilboxMethod method = cls.methods[index];
+			CilboxExecutionContext context = new CilboxExecutionContext();
+			context.rootProxy = ths;
+			context.rootClass = cls;
+			context.rootImportFunction = iid;
+			context.frames.Add( method.CreateFrame( ths, parameters ) );
+			return context;
+		}
+
+		private void StartNextQueuedInvocation()
+		{
+			if( activeExecutionContext != null || pendingInvocations.Count == 0 ) return;
+			PendingProxyInvocation invocation = pendingInvocations.Dequeue();
+			if( invocation.iid == ImportFunctionID.Update ) pendingUpdateQueued = false;
+			if( invocation.iid == ImportFunctionID.FixedUpdate ) pendingFixedUpdateQueued = false;
+			activeExecutionContext = CreateExecutionContext( invocation.cls, invocation.proxy, invocation.iid, invocation.parameters );
+		}
+
+		private void RunScheduledWork()
+		{
+			if( runningScheduler || disabled ) return;
+			runningScheduler = true;
+			try
+			{
+				while( !disabled )
+				{
+					StartNextQueuedInvocation();
+					if( activeExecutionContext == null ) break;
+
+					bool wasPaused = paused;
+					if( wasPaused )
+					{
+						paused = false;
+						pausedReason = "";
+						OnCilboxResumed?.Invoke( this );
+					}
+
+					if( !RunExecutionContext( activeExecutionContext ) )
+						break;
+
+					activeExecutionContext = null;
+				}
+			}
+			finally
+			{
+				runningScheduler = false;
+			}
+		}
+
+		private bool RunExecutionContext( CilboxExecutionContext context )
+		{
+			if( context.frames.Count == 0 ) return true;
+			CilboxMethod entryMethod = context.frames[context.frames.Count - 1].method;
+			if( !InterpreterEntry( entryMethod ) ) return false;
+
+			try
+			{
+				while( context.frames.Count > 0 )
+				{
+					CilboxExecutionFrame frame = context.frames[context.frames.Count - 1];
+					StackElement ret = frame.method.InterpretFrame( frame );
+					context.frames.RemoveAt( context.frames.Count - 1 );
+
+					if( context.frames.Count == 0 )
+					{
+						context.finalReturnValue = ret;
+						context.status = CilboxExecutionStatus.Completed;
+						return true;
+					}
+
+					context.frames[context.frames.Count - 1].ApplyChildReturn( ret );
+				}
+				return true;
+			}
+			catch( CilboxInterpreterPausedException e )
+			{
+				context.frames = e.Frames;
+				context.pauseReason = e.Reason;
+				paused = true;
+				pausedReason = e.Reason;
+				OnCilboxPaused?.Invoke( this, e.Reason );
+				return false;
+			}
+			catch( CilboxUnhandledInterpretedException e )
+			{
+				string exceptionTypeName = e.Throwee?.GetType().FullName ?? "null";
+				string reason = $"Exception of type {exceptionTypeName} was unhandled in interpreted code";
+				DisableWithReason( reason );
+				context.status = CilboxExecutionStatus.Faulted;
+				throw new CilboxInterpreterRuntimeException( reason, e.ClassName, e.MethodName, e.PC );
+			}
+			finally
+			{
+				InterpreterExit();
+			}
 		}
 
 		public bool InterpreterEntry( CilboxMethod m )
@@ -2474,6 +2846,17 @@ spiperf.End();
 		void Update()
 		{
 			usSpentLastFrame = Interlocked.Exchange( ref interpreterAccountingCumulitiveTicks, 0 ) / interpreterTicksInUs;
+			RunScheduledWork();
+		}
+
+		private void ClearScheduledWork()
+		{
+			activeExecutionContext = null;
+			pendingInvocations.Clear();
+			pendingUpdateQueued = false;
+			pendingFixedUpdateQueued = false;
+			paused = false;
+			pausedReason = "";
 		}
 
 		internal void DisableWithReason(string reason)
@@ -2481,6 +2864,7 @@ spiperf.End();
 			Debug.LogError( reason );
 			this.disabledReason = reason;
 			this.disabled = true;
+			ClearScheduledWork();
 			//this.InterpreterExit();
 			OnCilboxDisabled?.Invoke(this, reason);
 		}

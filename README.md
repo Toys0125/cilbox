@@ -73,13 +73,13 @@ For additional information:
 
 ### Resource accounting
 
-While a cilbox is executing, every 64 cycles it reports back to the owning box that it is using CPU time.  If the amount of time spent executing that cilbox per frame exceeds `timeoutLengthUs`, then the script will be killed at the next 64-cycle checkin.
+While a cilbox is executing, every 64 cycles it reports back to the owning box that it is using CPU time.  If the amount of time spent executing that cilbox per frame exceeds `timeoutLengthUs`, then the current interpreted call stack is paused at the next 64-cycle checkin.
 
 Execution time encompasses all time that is spent while there is a cilbox execution context.  For example, if your cilbox calls a Unity function, while it is within the unity function, it will be accounted against your script.  If your script is executing, and another method is called from a thread concurrently, then that time is only single-accounted.
 
 By default, `timeoutLengthUs` is 500ms.  For Avatars, 5ms.
 
-If execution within a box is exceeded, the box is disabled.  The box can be re-enabled by setting a flag on the box, to re-enable it, but in general, it should be expected to stay off, unless the asset is unloaded.
+If execution within a box exceeds its frame budget, the box preserves the interpreter continuation and resumes it automatically on later frames.  New proxy entrypoints are queued behind the paused continuation; repeated `Update()` and `FixedUpdate()` callbacks are coalesced so a paused box does not accumulate an unbounded per-frame backlog.  The disabled state is reserved for fatal runtime or security failures, not ordinary timeout pauses.
 
 
 ### Current limitations

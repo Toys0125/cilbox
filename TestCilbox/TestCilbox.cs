@@ -366,6 +366,14 @@ namespace TestCilbox
 			{
 				Validator.AddCount($"CilboxDisabled_{box.GetType().FullName}");
 			};
+			Cilbox.Cilbox.OnCilboxPaused += (Cilbox.Cilbox box, string reason) =>
+			{
+				Validator.AddCount($"CilboxPaused_{box.GetType().FullName}");
+			};
+			Cilbox.Cilbox.OnCilboxResumed += (Cilbox.Cilbox box) =>
+			{
+				Validator.AddCount($"CilboxResumed_{box.GetType().FullName}");
+			};
 
 			GameObject go = new GameObject("MyObjectToProxy");
 			TestCilboxBehaviour b = go.CreateComponent<TestCilboxBehaviour>();
@@ -458,31 +466,39 @@ namespace TestCilbox
 				Validator.Validate( e.ToString(), "Should be no error." );
 			}
 
-			try
-			{
-				// Ensure 50ms timeout for the Update test.
-				cb.timeoutLengthUs = 50000; // 50ms
-				// In case assembly is still being generated.
-				proxy.GetType().GetMethod("Update",BindingFlags.Instance|BindingFlags.NonPublic,Type.EmptyTypes).Invoke( proxy, new object[0] );
-			} catch( TargetInvocationException e )
-			{
-				if (e.InnerException is not CilboxInterpreterTimeoutException)
-				{
-					throw;
-				}
-				Debug.Log( e.ToString().Length.ToString() );
-				Validator.Set( "Overtime Exception", "Thrown" );
-			}
-			Validator.Validate( "Overtime Exception", "Thrown" );
+			// Ensure 50ms timeout for the Update test.
+			cb.timeoutLengthUs = 50000; // 50ms
+			// In case assembly is still being generated.
+			proxy.GetType().GetMethod("Update",BindingFlags.Instance|BindingFlags.NonPublic,Type.EmptyTypes).Invoke( proxy, new object[0] );
+			Validator.Set( "Overtime Exception", "Not Thrown" );
+			Validator.Validate( "Overtime Exception", "Not Thrown" );
 			Validator.Validate( "Overtime", "timed out" );
 			Validator.Validate( "Update", "called" );
+			Validator.Set( "Cilbox paused after timeout", cb.IsPaused.ToString() );
+			Validator.Set( "Cilbox pending after timeout", cb.HasPendingWork.ToString() );
+			Validator.Set( "Cilbox disabled after timeout", cb.disabled.ToString() );
+			Validator.Validate( "Cilbox paused after timeout", "True" );
+			Validator.Validate( "Cilbox pending after timeout", "True" );
+			Validator.Validate( "Cilbox disabled after timeout", "False" );
+			Validator.ValidateCount($"CilboxDisabled_{cb.GetType().FullName}", 0 );
+			Validator.ValidateCount($"CilboxPaused_{cb.GetType().FullName}", 1 );
 
-			Validator.Set( "Execution after timeout", "disabled" );
+			Validator.Set( "Execution after timeout", "paused" );
 			proxy.GetType().GetMethod("FixedUpdate",BindingFlags.Instance|BindingFlags.NonPublic,Type.EmptyTypes).Invoke( proxy, new object[0] );
-			Validator.Validate( "Execution after timeout", "disabled" );
+			Validator.Validate( "Execution after timeout", "paused" );
 
-			cb.disabled = false;
-			proxy.GetType().GetMethod("FixedUpdate",BindingFlags.Instance|BindingFlags.NonPublic,Type.EmptyTypes).Invoke( proxy, new object[0] );
+			MethodInfo boxUpdate = typeof(Cilbox.Cilbox).GetMethod("Update", BindingFlags.Instance|BindingFlags.NonPublic, Type.EmptyTypes);
+			for( int i = 0; i < 200 && cb.HasPendingWork; i++ )
+			{
+				boxUpdate.Invoke( cb, new object[0] );
+			}
+			Validator.Set( "Cilbox finished pending work", cb.HasPendingWork.ToString() );
+			Validator.Set( "Cilbox paused after resume", cb.IsPaused.ToString() );
+			Validator.Validate( "Cilbox finished pending work", "False" );
+			Validator.Validate( "Cilbox paused after resume", "False" );
+			Validator.Validate( "Overtime", "did not timed out" );
+			Validator.Set( "Cilbox resumed after timeout", (Validator.GetCount($"CilboxResumed_{cb.GetType().FullName}") > 0).ToString() );
+			Validator.Validate( "Cilbox resumed after timeout", "True" );
 
 			cb.timeoutLengthUs = 3000000; // should be over max
 			Validator.Set("Real timeoutLengthUs", cb.timeoutLengthUs.ToString() );
@@ -784,7 +800,7 @@ namespace TestCilbox
 			Validator.Validate("ThrowFromOtherBehaviour2Finally", "finally");
 			Validator.Validate("ThrowFromOtherConstructor", "caught");
 
-			Validator.ValidateCount($"CilboxDisabled_{cb.GetType().FullName}", 1 );
+			Validator.ValidateCount($"CilboxDisabled_{cb.GetType().FullName}", 0 );
 
 			if( runPerf )
 			{
