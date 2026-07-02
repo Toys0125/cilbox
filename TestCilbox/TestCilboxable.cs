@@ -1031,6 +1031,12 @@ namespace TestCilbox
 		private long totalUs = 0;
 		private System.Diagnostics.Stopwatch runningTimer;
 
+		public void Start()
+		{
+			totalUs = 0;
+			runningTimer = null;
+			Validator.Set($"Perf.{ClassName}.TotalUs", "0");
+		}
 
 		public void BeginPerfTiming()
 		{
