@@ -360,45 +360,56 @@ spiperf.Begin();
 
 						if( b == 0x28 && dt.fastNativeSignatureId != 0 )
 						{
-							switch( dt.fastNativeSignatureId )
+							try
 							{
-							case 1:
-								stackBuffer[sp].LoadFloat( ((Func<float, float>)dt.fastNativeDelegate)( stackBuffer[sp].f ) );
-								break;
-							case 2:
-							{
-								float right = stackBuffer[sp--].f;
-								stackBuffer[sp].LoadFloat( ((Func<float, float, float>)dt.fastNativeDelegate)( stackBuffer[sp].f, right ) );
-								break;
+								switch( dt.fastNativeSignatureId )
+								{
+								case 1:
+									stackBuffer[sp].LoadFloat( ((Func<float, float>)dt.fastNativeDelegate)( stackBuffer[sp].f ) );
+									break;
+								case 2:
+								{
+									float right = stackBuffer[sp--].f;
+									stackBuffer[sp].LoadFloat( ((Func<float, float, float>)dt.fastNativeDelegate)( stackBuffer[sp].f, right ) );
+									break;
+								}
+								case 3:
+									stackBuffer[sp].LoadDouble( ((Func<double, double>)dt.fastNativeDelegate)( stackBuffer[sp].d ) );
+									break;
+								case 4:
+								{
+									double right = stackBuffer[sp--].d;
+									stackBuffer[sp].LoadDouble( ((Func<double, double, double>)dt.fastNativeDelegate)( stackBuffer[sp].d, right ) );
+									break;
+								}
+								case 5:
+									stackBuffer[sp].LoadInt( ((Func<int, int>)dt.fastNativeDelegate)( stackBuffer[sp].i ) );
+									break;
+								case 6:
+								{
+									int right = stackBuffer[sp--].i;
+									stackBuffer[sp].LoadInt( ((Func<int, int, int>)dt.fastNativeDelegate)( stackBuffer[sp].i, right ) );
+									break;
+								}
+								case 7:
+									stackBuffer[sp].LoadLong( ((Func<long, long>)dt.fastNativeDelegate)( stackBuffer[sp].l ) );
+									break;
+								case 8:
+								{
+									long right = stackBuffer[sp--].l;
+									stackBuffer[sp].LoadLong( ((Func<long, long, long>)dt.fastNativeDelegate)( stackBuffer[sp].l, right ) );
+									break;
+								}
+								default: throw new CilboxInterpreterRuntimeException($"Invalid fast native signature id {dt.fastNativeSignatureId}", parentClass.className, methodName, pc);
+								}
 							}
-							case 3:
-								stackBuffer[sp].LoadDouble( ((Func<double, double>)dt.fastNativeDelegate)( stackBuffer[sp].d ) );
-								break;
-							case 4:
+							catch( CilboxInterpreterRuntimeException )
 							{
-								double right = stackBuffer[sp--].d;
-								stackBuffer[sp].LoadDouble( ((Func<double, double, double>)dt.fastNativeDelegate)( stackBuffer[sp].d, right ) );
-								break;
+								throw;
 							}
-							case 5:
-								stackBuffer[sp].LoadInt( ((Func<int, int>)dt.fastNativeDelegate)( stackBuffer[sp].i ) );
-								break;
-							case 6:
+							catch( Exception e )
 							{
-								int right = stackBuffer[sp--].i;
-								stackBuffer[sp].LoadInt( ((Func<int, int, int>)dt.fastNativeDelegate)( stackBuffer[sp].i, right ) );
-								break;
-							}
-							case 7:
-								stackBuffer[sp].LoadLong( ((Func<long, long>)dt.fastNativeDelegate)( stackBuffer[sp].l ) );
-								break;
-							case 8:
-							{
-								long right = stackBuffer[sp--].l;
-								stackBuffer[sp].LoadLong( ((Func<long, long, long>)dt.fastNativeDelegate)( stackBuffer[sp].l, right ) );
-								break;
-							}
-							default: throw new CilboxInterpreterRuntimeException($"Invalid fast native signature id {dt.fastNativeSignatureId}", parentClass.className, methodName, pc);
+								interpretedThrow(currentInstruction, e is TargetInvocationException tie && tie.InnerException != null ? tie.InnerException : e);
 							}
 							break;
 						}

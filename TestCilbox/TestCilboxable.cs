@@ -116,6 +116,16 @@ namespace TestCilbox
 			Validator.Set( "Math.Cos", Math.Cos( 0.0 ).ToString() );
 			Validator.Set( "Math.Pow", Math.Pow( 2.0, 3.0 ).ToString() );
 			Validator.Set( "Math.AbsInt", Math.Abs( -7 ).ToString() );
+			try
+			{
+				Validator.Set( "Math.AbsIntMin Catch", "try" );
+				int result = Math.Abs( int.MinValue );
+				Validator.Set( "Math.AbsIntMin Catch", "didn't throw " + result.ToString() );
+			}
+			catch( OverflowException )
+			{
+				Validator.Set( "Math.AbsIntMin Catch", "caught" );
+			}
 			Validator.Set( "Math.Max", Math.Max( 2, 5 ).ToString() );
 			Validator.Set( "Math.AbsLong", Math.Abs( -9L ).ToString() );
 			Validator.Set( "Math.MaxLong", Math.Max( 2L, 5L ).ToString() );

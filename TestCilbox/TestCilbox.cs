@@ -50,6 +50,7 @@ namespace TestCilbox
 			"System.NullReferenceException",
 			"System.Numerics.Vector2",
 			"System.Object",
+			"System.OverflowException",
 			"System.Single",
 			"System.String",
 			"System.TimeSpan",
@@ -650,6 +651,7 @@ namespace TestCilbox
 				Validator.Validate( "Math.Cos", "1" );
 				Validator.Validate( "Math.Pow", "8" );
 				Validator.Validate( "Math.AbsInt", "7" );
+				Validator.Validate( "Math.AbsIntMin Catch", "caught" );
 				Validator.Validate( "Math.Max", "5" );
 				Validator.Validate( "Math.AbsLong", "9" );
 				Validator.Validate( "Math.MaxLong", "5" );
