@@ -73,7 +73,7 @@ For additional information:
 
 ### Resource accounting
 
-While a cilbox is executing, every 64 cycles it reports back to the owning box that it is using CPU time.  If the amount of time spent executing that cilbox per frame exceeds `timeoutLengthUs`, then the script will be killed at the next 64-cycle checkin.
+While a cilbox is executing, every 1024 interpreter cycles it reports back to the owning box that it is using CPU time.  If the amount of time spent executing that cilbox per frame exceeds `timeoutLengthUs`, then the script will be killed at the next 1024-cycle checkin.
 
 Execution time encompasses all time that is spent while there is a cilbox execution context.  For example, if your cilbox calls a Unity function, while it is within the unity function, it will be accounted against your script.  If your script is executing, and another method is called from a thread concurrently, then that time is only single-accounted.
 

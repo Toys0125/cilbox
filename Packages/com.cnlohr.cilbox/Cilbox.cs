@@ -259,7 +259,7 @@ namespace Cilbox
 					//
 					// If you use Interlocked.Add() it slows the whole emulator down by about 40%!
 					long steps = ++box.interpreterInstructionsCount;
-					if( ( steps & 0x3f ) == 0 )
+					if( ( steps & 0x3ff ) == 0 )
 					{
 						long now = System.Diagnostics.Stopwatch.GetTimestamp();
 						if( now > box.interpreterAccountingDropDead )
@@ -356,6 +356,51 @@ spiperf.Begin();
 						if( !dt.isValid )
 						{
 							throw new CilboxInterpreterRuntimeException("Error, function " + dt.Name + " Not found in " + parentClass.className + ":" + fullSignature, parentClass.className, methodName, pc);
+						}
+
+						if( b == 0x28 && dt.fastNativeSignatureId != 0 )
+						{
+							switch( dt.fastNativeSignatureId )
+							{
+							case 1:
+								stackBuffer[sp].LoadFloat( ((Func<float, float>)dt.fastNativeDelegate)( stackBuffer[sp].f ) );
+								break;
+							case 2:
+							{
+								float right = stackBuffer[sp--].f;
+								stackBuffer[sp].LoadFloat( ((Func<float, float, float>)dt.fastNativeDelegate)( stackBuffer[sp].f, right ) );
+								break;
+							}
+							case 3:
+								stackBuffer[sp].LoadDouble( ((Func<double, double>)dt.fastNativeDelegate)( stackBuffer[sp].d ) );
+								break;
+							case 4:
+							{
+								double right = stackBuffer[sp--].d;
+								stackBuffer[sp].LoadDouble( ((Func<double, double, double>)dt.fastNativeDelegate)( stackBuffer[sp].d, right ) );
+								break;
+							}
+							case 5:
+								stackBuffer[sp].LoadInt( ((Func<int, int>)dt.fastNativeDelegate)( stackBuffer[sp].i ) );
+								break;
+							case 6:
+							{
+								int right = stackBuffer[sp--].i;
+								stackBuffer[sp].LoadInt( ((Func<int, int, int>)dt.fastNativeDelegate)( stackBuffer[sp].i, right ) );
+								break;
+							}
+							case 7:
+								stackBuffer[sp].LoadLong( ((Func<long, long>)dt.fastNativeDelegate)( stackBuffer[sp].l ) );
+								break;
+							case 8:
+							{
+								long right = stackBuffer[sp--].l;
+								stackBuffer[sp].LoadLong( ((Func<long, long, long>)dt.fastNativeDelegate)( stackBuffer[sp].l, right ) );
+								break;
+							}
+							default: throw new CilboxInterpreterRuntimeException($"Invalid fast native signature id {dt.fastNativeSignatureId}", parentClass.className, methodName, pc);
+							}
+							break;
 						}
 
 						if( !dt.isNative )
@@ -565,18 +610,42 @@ spiperf.Begin();
 
 								if (callthis == null)
 								{
-									interpretedThrow(pc - 1, new NullReferenceException());
-									break;
+									Type nullableUnderlyingType = Nullable.GetUnderlyingType(t);
+									if( nullableUnderlyingType != null )
+									{
+										switch( mi.Name )
+										{
+										case "get_HasValue":
+											iko = false;
+											break;
+										case "GetValueOrDefault":
+											iko = callpar.Length == 0 ? Activator.CreateInstance(nullableUnderlyingType) : callpar[0];
+											break;
+										case "get_Value":
+											interpretedThrow(currentInstruction, new InvalidOperationException("Nullable object must have a value."));
+											break;
+										default:
+											interpretedThrow(currentInstruction, new NullReferenceException());
+											break;
+										}
+									}
+									else
+									{
+										interpretedThrow(currentInstruction, new NullReferenceException());
+									}
+									if( iko == null ) break;
 								}
-
-								try
+								else
 								{
-									iko = st.Invoke( callthis, callpar );
-								}
-								catch( TargetInvocationException e )
-								{
-									interpretedThrow(pc - 1, e.InnerException ?? e);
-									break;
+									try
+									{
+										iko = st.Invoke( callthis, callpar );
+									}
+									catch( TargetInvocationException e )
+									{
+										interpretedThrow(currentInstruction, e.InnerException ?? e);
+										break;
+									}
 								}
 								if( seorig.type == StackType.Address  && callthis is not BoxedCilboxEnum ) // enums are immutable
 								{
@@ -2109,6 +2178,8 @@ spiperf.End();
 		public bool shimIsVoid;
 		public bool shimIsStatic;
 		public int  shimParameterCount;
+		public Delegate fastNativeDelegate;
+		public int fastNativeSignatureId;
 	}
 
 	public enum MetaTokenType
@@ -2441,6 +2512,7 @@ spiperf.End();
 							}
 							t.nativeParameterTypes = mpt;
 							t.nativeIsVoid = (m is MethodInfo mInfo) && mInfo.ReturnType == typeof(void);
+							CilboxUsage.TryCreateAutomaticFastNativeOverride( t, m );
 						} else if( !t.isNative )
 						{
 							throw new CilboxException( "Error: Could not find reference to: [" + useAssembly + "][" + declaringType.FullName + "][" + fullSignature + "] Type from:" + declaringTypeName );

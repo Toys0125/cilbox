@@ -16,7 +16,7 @@ namespace TestCilbox
 	[CilboxTarget]
 	public class CilboxTester : Cilbox.Cilbox
 	{
-		public override long MaxTimeoutLengthUs => 2000000; // 2 seconds.
+		public override long MaxTimeoutLengthUs => 15000000; // 15 seconds.
 
 		static HashSet<String> whiteListType = new HashSet<String>(){
 			"Cilbox.CilboxPublicUtils",
@@ -45,12 +45,15 @@ namespace TestCilbox
 			"System.Int64",
 			"System.IntPtr",
 			"System.MathF",
+			"System.Nullable",
+			"System.Nullable`1",
 			"System.NullReferenceException",
 			"System.Numerics.Vector2",
 			"System.Object",
 			"System.Single",
 			"System.String",
 			"System.TimeSpan",
+			"System.Type",
 			"System.UInt16",
 			"System.UInt32",
 			"System.ValueTuple",
@@ -262,6 +265,48 @@ namespace TestCilbox
 		{
 			i = 42;
 		}
+
+		public static void GetOutNullableInt(out int? i)
+		{
+			i = 42;
+		}
+
+		public static void GetOutNullableIntNull(out int? i)
+		{
+			i = null;
+		}
+
+		public static string NullablePrimitiveSummary(bool? flag, int? count, float? ratio)
+		{
+			return $"{(flag.HasValue ? flag.Value.ToString() : "null")}, {(count.HasValue ? count.Value.ToString() : "null")}, {(ratio.HasValue ? ratio.Value.ToString() : "null")}";
+		}
+
+		public static int? GetNullableInt()
+		{
+			return 123;
+		}
+
+		public static Type GetNullableIntReturnType()
+		{
+			return typeof(TestUtil).GetMethod(nameof(GetNullableInt)).ReturnType;
+		}
+
+		public static bool TestNullableHasValue(int? value)
+		{
+			return value.HasValue;
+		}
+
+		public static int TestNullableGetValueOrDefault(int? value)
+		{
+			return value.GetValueOrDefault();
+		}
+
+#pragma warning disable CS8629 // Intentional: validates Nullable<T>.Value exception behavior inside the interpreter.
+		public static int TestNullableValue(int? value)
+		{
+			return value.Value;
+		}
+#pragma warning restore CS8629
 	}
 
 
@@ -308,30 +353,192 @@ namespace TestCilbox
 			}
 		}
 
+		private static MethodInfo RequireStaticMethod(Type declaringType, string name, params Type[] parameterTypes)
+		{
+			MethodInfo method = declaringType.GetMethod(name, BindingFlags.Public | BindingFlags.Static, null, parameterTypes, null);
+			if( method == null )
+				throw new MissingMethodException(declaringType.FullName, name);
+			return method;
+		}
+
+		private static void ValidateAutomaticFastNativeOverride(string key, MethodInfo method, int expectedSignatureId, Type expectedDelegateType)
+		{
+			CilMetadataTokenInfo metadata = new CilMetadataTokenInfo(MetaTokenType.mtMethod);
+			bool created = CilboxUsage.TryCreateAutomaticFastNativeOverride(metadata, method);
+			bool passed = created &&
+				metadata.fastNativeSignatureId == expectedSignatureId &&
+				metadata.fastNativeDelegate != null &&
+				expectedDelegateType.IsInstanceOfType(metadata.fastNativeDelegate);
+
+			Validator.Set(key, passed ? "OK" : $"failed created={created} id={metadata.fastNativeSignatureId} delegate={metadata.fastNativeDelegate?.GetType().FullName ?? "null"}");
+			Validator.Validate(key, "OK");
+		}
+
+		private static void ValidateNoAutomaticFastNativeOverride(string key, MethodInfo method)
+		{
+			CilMetadataTokenInfo metadata = new CilMetadataTokenInfo(MetaTokenType.mtMethod);
+			bool created = CilboxUsage.TryCreateAutomaticFastNativeOverride(metadata, method);
+			bool passed = !created && metadata.fastNativeSignatureId == 0 && metadata.fastNativeDelegate == null;
+
+			Validator.Set(key, passed ? "OK" : $"failed created={created} id={metadata.fastNativeSignatureId} delegate={metadata.fastNativeDelegate?.GetType().FullName ?? "null"}");
+			Validator.Validate(key, "OK");
+		}
+
+		private static void ValidateAutomaticFastNativeOverrides()
+		{
+			ValidateAutomaticFastNativeOverride("AutoFastNative MathF.Sin", RequireStaticMethod(typeof(MathF), "Sin", typeof(float)), 1, typeof(Func<float, float>));
+			ValidateAutomaticFastNativeOverride("AutoFastNative MathF.Pow", RequireStaticMethod(typeof(MathF), "Pow", typeof(float), typeof(float)), 2, typeof(Func<float, float, float>));
+			ValidateAutomaticFastNativeOverride("AutoFastNative Math.Cos", RequireStaticMethod(typeof(Math), "Cos", typeof(double)), 3, typeof(Func<double, double>));
+			ValidateAutomaticFastNativeOverride("AutoFastNative Math.Pow", RequireStaticMethod(typeof(Math), "Pow", typeof(double), typeof(double)), 4, typeof(Func<double, double, double>));
+			ValidateAutomaticFastNativeOverride("AutoFastNative Math.AbsInt", RequireStaticMethod(typeof(Math), "Abs", typeof(int)), 5, typeof(Func<int, int>));
+			ValidateAutomaticFastNativeOverride("AutoFastNative Math.MaxInt", RequireStaticMethod(typeof(Math), "Max", typeof(int), typeof(int)), 6, typeof(Func<int, int, int>));
+			ValidateAutomaticFastNativeOverride("AutoFastNative Math.AbsLong", RequireStaticMethod(typeof(Math), "Abs", typeof(long)), 7, typeof(Func<long, long>));
+			ValidateAutomaticFastNativeOverride("AutoFastNative Math.MaxLong", RequireStaticMethod(typeof(Math), "Max", typeof(long), typeof(long)), 8, typeof(Func<long, long, long>));
+			ValidateNoAutomaticFastNativeOverride("AutoFastNative Unsupported Clamp", RequireStaticMethod(typeof(Math), "Clamp", typeof(int), typeof(int), typeof(int)));
+			ValidateNoAutomaticFastNativeOverride("AutoFastNative Unsupported String", RequireStaticMethod(typeof(string), "IsNullOrEmpty", typeof(string)));
+		}
+
 		private static void RunPerfSuite(Cilbox.Cilbox cb, Cilbox.CilboxProxy perfRootProxy, Cilbox.CilboxProxy perfPeerProxy)
 		{
 			cb.disabled = false;
 			cb.timeoutLengthUs = PerfTimeoutUs;
 
-			Validator.Set("PerfRunStatus", "failed");
-			InvokeProxyMethod(perfPeerProxy, "Awake");
-			InvokeProxyMethod(perfPeerProxy, "Start");
-			InvokeProxyMethod(perfRootProxy, "Awake");
-			InvokeProxyMethod(perfRootProxy, "Start");
-			Validator.Set("PerfRunStatus", "complete");
+			const int warmupRuns = 3;
+			const int measureRuns = 15;
+
+			for( int w = 0; w < warmupRuns; w++ )
+			{
+				Validator.Set("PerfRunStatus", "failed");
+				InvokeProxyMethod(perfPeerProxy, "Awake");
+				InvokeProxyMethod(perfPeerProxy, "Start");
+				InvokeProxyMethod(perfRootProxy, "Awake");
+				InvokeProxyMethod(perfRootProxy, "Start");
+			}
+
+			List<long> rootTotals = new List<long>();
+			List<long> peerTotals = new List<long>();
+			Dictionary<string, List<long>> rootMetrics = new Dictionary<string, List<long>>();
+			Dictionary<string, List<long>> peerMetrics = new Dictionary<string, List<long>>();
 
 			string rootClass = PerfRootBehaviour.ClassName;
 			string peerClass = PerfPeerBehaviour.ClassName;
-			Validator.Validate("PerfRunStatus", "complete");
-			Validator.ValidatePositiveLong($"Perf.{rootClass}.RecursiveUs");
-			Validator.ValidatePositiveLong($"Perf.{rootClass}.FourierUs");
-			Validator.ValidatePositiveLong($"Perf.{rootClass}.TrigUs");
-			Validator.ValidatePositiveLong($"Perf.{rootClass}.MatrixUs");
-			Validator.ValidatePositiveLong($"Perf.{rootClass}.PeerCallsUs");
-			Validator.ValidatePositiveLong($"Perf.{rootClass}.TotalUs");
-			Validator.ValidatePositiveLong($"Perf.{peerClass}.TotalUs");
+			string[] taskKeys = new string[]
+			{
+				$"Perf.{rootClass}.RecursiveUs",
+				$"Perf.{rootClass}.FourierUs",
+				$"Perf.{rootClass}.TrigUs",
+				$"Perf.{rootClass}.MatrixUs",
+				$"Perf.{rootClass}.PeerCallsUs",
+			};
 
-			PrintPerfSummary();
+			foreach( string key in taskKeys )
+				rootMetrics[key] = new List<long>();
+			peerMetrics[$"Perf.{peerClass}.TotalUs"] = new List<long>();
+
+			for( int run = 0; run < measureRuns; run++ )
+			{
+				cb.timeoutLengthUs = PerfTimeoutUs;
+				Validator.Set("PerfRunStatus", "failed");
+				InvokeProxyMethod(perfPeerProxy, "Awake");
+				InvokeProxyMethod(perfPeerProxy, "Start");
+				InvokeProxyMethod(perfRootProxy, "Awake");
+				InvokeProxyMethod(perfRootProxy, "Start");
+				Validator.Set("PerfRunStatus", "complete");
+
+				Validator.Validate("PerfRunStatus", "complete");
+				Validator.ValidatePositiveLong($"Perf.{rootClass}.RecursiveUs");
+				Validator.ValidatePositiveLong($"Perf.{rootClass}.FourierUs");
+				Validator.ValidatePositiveLong($"Perf.{rootClass}.TrigUs");
+				Validator.ValidatePositiveLong($"Perf.{rootClass}.MatrixUs");
+				Validator.ValidatePositiveLong($"Perf.{rootClass}.PeerCallsUs");
+				Validator.ValidatePositiveLong($"Perf.{rootClass}.TotalUs");
+				Validator.ValidatePositiveLong($"Perf.{peerClass}.TotalUs");
+
+				long rootTotal = long.Parse(Validator.Get($"Perf.{rootClass}.TotalUs"));
+				long peerTotal = long.Parse(Validator.Get($"Perf.{peerClass}.TotalUs"));
+				rootTotals.Add(rootTotal);
+				peerTotals.Add(peerTotal);
+
+				foreach( string key in taskKeys )
+					rootMetrics[key].Add(long.Parse(Validator.Get(key)));
+				peerMetrics[$"Perf.{peerClass}.TotalUs"].Add(peerTotal);
+			}
+
+			PrintPerfStatistics(rootTotals, peerTotals, rootMetrics, peerMetrics);
+		}
+
+		private static void PrintPerfStatistics(List<long> rootTotals, List<long> peerTotals,
+			Dictionary<string, List<long>> rootMetrics, Dictionary<string, List<long>> peerMetrics)
+		{
+			Console.WriteLine("=== PERFORMANCE STATISTICS ===");
+
+			PrintStatLine("Root TotalUs", rootTotals);
+			PrintStatLine("Peer TotalUs", peerTotals);
+
+			foreach( var kvp in rootMetrics )
+			{
+				string name = kvp.Key.Split('.').Last();
+				PrintStatLine(name, kvp.Value);
+			}
+
+			foreach( var kvp in peerMetrics )
+			{
+				string name = kvp.Key.Split('.').Last();
+				PrintStatLine(name, kvp.Value);
+			}
+		}
+
+		private static void PrintStatLine(string name, List<long> values)
+		{
+			if( values.Count == 0 ) return;
+
+			List<long> sorted = new List<long>(values);
+			sorted.Sort();
+
+			long sum = 0;
+			long min = long.MaxValue;
+			long max = long.MinValue;
+			foreach( long v in values )
+			{
+				sum += v;
+				if( v < min ) min = v;
+				if( v > max ) max = v;
+			}
+			double mean = (double)sum / values.Count;
+
+			double variance = 0;
+			foreach( long v in values )
+			{
+				double diff = v - mean;
+				variance += diff * diff;
+			}
+			variance /= values.Count;
+			double stdDev = Math.Sqrt(variance);
+			double cv = (mean > 0) ? (stdDev / mean * 100.0) : 0;
+
+			double p50 = Percentile(sorted, 50);
+			double p90 = Percentile(sorted, 90);
+			double p95 = Percentile(sorted, 95);
+			double p99 = Percentile(sorted, 99);
+
+			List<long> deviations = new List<long>();
+			foreach( long v in values )
+				deviations.Add(Math.Abs(v - (long)p50));
+			deviations.Sort();
+			double mad = Percentile(deviations, 50);
+
+			Console.WriteLine($"PERF {name}: mean={mean:F0}us p50={p50:F0}us p90={p90:F0}us p95={p95:F0}us p99={p99:F0}us min={min}us max={max}us stddev={stdDev:F0}us mad={mad:F0}us cv={cv:F1}% (runs={values.Count})");
+		}
+
+		private static double Percentile(List<long> sorted, double p)
+		{
+			if( sorted.Count == 0 ) return 0;
+			double index = (p / 100.0) * (sorted.Count - 1);
+			int lower = (int)Math.Floor(index);
+			int upper = (int)Math.Ceiling(index);
+			if( lower == upper ) return sorted[lower];
+			double weight = index - lower;
+			return sorted[lower] * (1 - weight) + sorted[upper] * weight;
 		}
 
 		public static int Main(string[] args)
@@ -353,6 +560,7 @@ namespace TestCilbox
 			};
 
 			ValidateNegativeFieldsObjectIndex();
+			ValidateAutomaticFastNativeOverrides();
 
 			GameObject go = new GameObject("MyObjectToProxy");
 			TestCilboxBehaviour b = go.CreateComponent<TestCilboxBehaviour>();
@@ -437,6 +645,15 @@ namespace TestCilbox
 				Validator.Validate( "recursive function", "511" );
 				Validator.Validate( "string concatenation", "it works" );
 				Validator.Validate( "MathF.Sin", "-0.058374193" );
+				Validator.Validate( "MathF.Max", "1.5" );
+				Validator.Validate( "MathF.Pow", "8" );
+				Validator.Validate( "Math.Cos", "1" );
+				Validator.Validate( "Math.Pow", "8" );
+				Validator.Validate( "Math.AbsInt", "7" );
+				Validator.Validate( "Math.Max", "5" );
+				Validator.Validate( "Math.AbsLong", "9" );
+				Validator.Validate( "Math.MaxLong", "5" );
+				Validator.Validate( "MathF.Sin DivideByZero", "caught" );
 
 				proxy.GetType().GetMethod("LateUpdate",BindingFlags.Instance|BindingFlags.NonPublic,Type.EmptyTypes).Invoke( proxy, new object[0] );
 				Validator.Validate( "LateUpdate", "called" );
@@ -479,7 +696,7 @@ namespace TestCilbox
 			cb.disabled = false;
 			proxy.GetType().GetMethod("FixedUpdate",BindingFlags.Instance|BindingFlags.NonPublic,Type.EmptyTypes).Invoke( proxy, new object[0] );
 
-			cb.timeoutLengthUs = 3000000; // should be over max
+			cb.timeoutLengthUs = 30000000; // should be over max
 			Validator.Set("Real timeoutLengthUs", cb.timeoutLengthUs.ToString() );
 			Validator.Validate("Real timeoutLengthUs", cb.MaxTimeoutLengthUs.ToString() );
 
@@ -765,6 +982,20 @@ namespace TestCilbox
 			Validator.Validate("NativeOutVec3", "(12, 8, 0)");
 			Validator.Validate("CilOutVec3", "(1, 2, 3)");
 			Validator.Validate("NativeOutInt", "42");
+			Validator.Validate("NativeOutNullableIntHasValue", "True");
+			Validator.Validate("NativeOutNullableIntValue", "42");
+			Validator.Validate("NativeOutNullableIntNullHasValue", "False");
+			Validator.Validate("NativeOutNullableIntNullValue", "0");
+			Validator.Validate("NullablePrimitiveCoerceValues", "True, 42, 1.5");
+			Validator.Validate("NullablePrimitiveCoerceNulls", "null, null, null");
+			Validator.Validate("NullableReturnTypeIsNullable", "True");
+			Validator.Validate("NullableReturnTypeUnderlying", "System.Int32");
+			Validator.Validate("InterpNullableHasValue", "True");
+			Validator.Validate("InterpNullableGetValueOrDefault", "42");
+			Validator.Validate("InterpNullableValue", "42");
+			Validator.Validate("InterpNullableNullHasValue", "False");
+			Validator.Validate("InterpNullableNullGetValueOrDefault", "0");
+			Validator.Validate("InterpNullableNullValue", "caught");
 			Validator.Validate("CilOutInt", "22");
 			Validator.Validate("NativeOutVec3AlreadyInit", "(12, 8, 0)");
 			Validator.Validate("PrivateBoolOutSuccess", "True");

@@ -178,6 +178,26 @@ namespace Cilbox
 
 		public object CoerceToObject( Type t )
 		{
+			Type nullableUnderlyingType = Nullable.GetUnderlyingType(t);
+			if( nullableUnderlyingType != null )
+			{
+				if( type == StackType.Object && o == null )
+				{
+					return null;
+				}
+				// If we have a boxed Nullable<T> with a value, extract the underlying value
+				if( type == StackType.Object && o != null && o.GetType() == t )
+				{
+					// o is a boxed Nullable<T>, get its Value property
+					var valueProp = t.GetProperty("Value");
+					if( valueProp != null )
+					{
+						return valueProp.GetValue(o);
+					}
+				}
+				t = nullableUnderlyingType;
+			}
+
 			StackType rt = StackTypeFromType( t );
 
 			if( t.IsEnum && type < StackType.Object )

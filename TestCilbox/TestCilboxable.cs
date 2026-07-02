@@ -70,6 +70,23 @@ namespace TestCilbox
 			RecursiveTest( i-1 );
 		}
 
+		private bool InterpretedNullableHasValue(int? value)
+		{
+			return value.HasValue;
+		}
+
+		private int InterpretedNullableGetValueOrDefault(int? value)
+		{
+			return value.GetValueOrDefault();
+		}
+
+#pragma warning disable CS8629 // Intentional: validates Nullable<T>.Value exception behavior inside the interpreter.
+		private int InterpretedNullableValue(int? value)
+		{
+			return value.Value;
+		}
+#pragma warning restore CS8629
+
 		public void Start()
 		{
 			Debug.Log( "🔵 TestCilboxBehaviour.Start()" );
@@ -94,6 +111,26 @@ namespace TestCilbox
 			Validator.Set( "recursive function", recursive_test_counter.ToString() );
 			Validator.Set( "string concatenation", "it" + " " + "works" );
 			Validator.Set( "MathF.Sin", MathF.Sin(3.2f).ToString() );
+			Validator.Set( "MathF.Max", MathF.Max( -2.5f, 1.5f ).ToString() );
+			Validator.Set( "MathF.Pow", MathF.Pow( 2.0f, 3.0f ).ToString() );
+			Validator.Set( "Math.Cos", Math.Cos( 0.0 ).ToString() );
+			Validator.Set( "Math.Pow", Math.Pow( 2.0, 3.0 ).ToString() );
+			Validator.Set( "Math.AbsInt", Math.Abs( -7 ).ToString() );
+			Validator.Set( "Math.Max", Math.Max( 2, 5 ).ToString() );
+			Validator.Set( "Math.AbsLong", Math.Abs( -9L ).ToString() );
+			Validator.Set( "Math.MaxLong", Math.Max( 2L, 5L ).ToString() );
+
+			try
+			{
+				Validator.Set( "MathF.Sin DivideByZero", "try" );
+				int zero = 0;
+				float result = MathF.Sin( 5 / zero );
+				Validator.Set( "MathF.Sin DivideByZero", "didn't throw " + result.ToString() );
+			}
+			catch( DivideByZeroException )
+			{
+				Validator.Set( "MathF.Sin DivideByZero", "caught" );
+			}
 
 			using (DisposeTester dt = new DisposeTester())
 			{
@@ -567,11 +604,39 @@ namespace TestCilbox
 			Validator.Set("CilOutVec3", outVec2.ToString() );
 			TestUtil.GetOutInt(out int outInt);
 			Validator.Set("NativeOutInt", outInt.ToString() );
+			TestUtil.GetOutNullableInt(out int? outNullableInt);
+			Validator.Set("NativeOutNullableIntHasValue", outNullableInt.HasValue.ToString() );
+			Validator.Set("NativeOutNullableIntValue", outNullableInt.GetValueOrDefault().ToString() );
+			TestUtil.GetOutNullableIntNull(out int? outNullableIntNull);
+			Validator.Set("NativeOutNullableIntNullHasValue", outNullableIntNull.HasValue.ToString() );
+			Validator.Set("NativeOutNullableIntNullValue", outNullableIntNull.GetValueOrDefault().ToString() );
 			TestOutInt(out int outInt2);
 			Validator.Set("CilOutInt", outInt2.ToString() );
 			Vector3 alreadyInit = new Vector3(5, 5, 5);
 			TestUtil.GetOutVec3(out alreadyInit);
 			Validator.Set("NativeOutVec3AlreadyInit", alreadyInit.ToString() );
+			Validator.Set("NullablePrimitiveCoerceValues", TestUtil.NullablePrimitiveSummary(true, 42, 1.5f) );
+			Validator.Set("NullablePrimitiveCoerceNulls", TestUtil.NullablePrimitiveSummary(null, null, null) );
+			Validator.Set("InterpNullableHasValue", InterpretedNullableHasValue(42).ToString() );
+			Validator.Set("InterpNullableGetValueOrDefault", InterpretedNullableGetValueOrDefault(42).ToString() );
+			Validator.Set("InterpNullableValue", InterpretedNullableValue(42).ToString() );
+			int? nullNullable = null;
+			Validator.Set("InterpNullableNullHasValue", InterpretedNullableHasValue(nullNullable).ToString() );
+			Validator.Set("InterpNullableNullGetValueOrDefault", InterpretedNullableGetValueOrDefault(nullNullable).ToString() );
+			try
+			{
+				Validator.Set("InterpNullableNullValue", "try");
+				InterpretedNullableValue(nullNullable);
+				Validator.Set("InterpNullableNullValue", "didnt throw");
+			}
+			catch (Exception)
+			{
+				Validator.Set("InterpNullableNullValue", "caught");
+			}
+			Type nullableReturnType = TestUtil.GetNullableIntReturnType();
+			Type nullableUnderlyingType = Nullable.GetUnderlyingType(nullableReturnType);
+			Validator.Set("NullableReturnTypeIsNullable", (nullableUnderlyingType != null).ToString() );
+			Validator.Set("NullableReturnTypeUnderlying", nullableUnderlyingType.FullName );
 			bool privateOutSuccess = TryGetPrivateOutInt(out int privateOutInt);
 			Validator.Set("PrivateBoolOutSuccess", privateOutSuccess.ToString() );
 			Validator.Set("PrivateBoolOutInt", privateOutInt.ToString() );

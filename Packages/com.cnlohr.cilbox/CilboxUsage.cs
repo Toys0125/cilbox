@@ -320,6 +320,56 @@ namespace Cilbox
 			return false;
 		}
 
+		private static bool IsAutoFastPathType( Type declaringType )
+		{
+			return declaringType == typeof(MathF) || declaringType == typeof(Math);
+		}
+
+		private static bool TrySetFastNativeDelegate( CilMetadataTokenInfo t, MethodInfo method, int signatureId, Type delegateType )
+		{
+			try
+			{
+				t.fastNativeDelegate = Delegate.CreateDelegate( delegateType, method );
+				t.fastNativeSignatureId = signatureId;
+				return true;
+			}
+			catch
+			{
+				t.fastNativeDelegate = null;
+				t.fastNativeSignatureId = 0;
+				return false;
+			}
+		}
+
+		public static bool TryCreateAutomaticFastNativeOverride( CilMetadataTokenInfo t, MethodBase methodBase )
+		{
+			if( methodBase is not MethodInfo method || !method.IsStatic || method.ContainsGenericParameters ) return false;
+			if( !IsAutoFastPathType( method.DeclaringType ) ) return false;
+
+			ParameterInfo[] parameters = method.GetParameters();
+			if( parameters.Length == 1 )
+			{
+				Type p0 = parameters[0].ParameterType;
+				Type ret = method.ReturnType;
+				if( p0 == typeof(float) && ret == typeof(float) ) return TrySetFastNativeDelegate( t, method, 1, typeof(Func<float, float>) );
+				if( p0 == typeof(double) && ret == typeof(double) ) return TrySetFastNativeDelegate( t, method, 3, typeof(Func<double, double>) );
+				if( p0 == typeof(int) && ret == typeof(int) ) return TrySetFastNativeDelegate( t, method, 5, typeof(Func<int, int>) );
+				if( p0 == typeof(long) && ret == typeof(long) ) return TrySetFastNativeDelegate( t, method, 7, typeof(Func<long, long>) );
+			}
+			else if( parameters.Length == 2 )
+			{
+				Type p0 = parameters[0].ParameterType;
+				Type p1 = parameters[1].ParameterType;
+				Type ret = method.ReturnType;
+				if( p0 == typeof(float) && p1 == typeof(float) && ret == typeof(float) ) return TrySetFastNativeDelegate( t, method, 2, typeof(Func<float, float, float>) );
+				if( p0 == typeof(double) && p1 == typeof(double) && ret == typeof(double) ) return TrySetFastNativeDelegate( t, method, 4, typeof(Func<double, double, double>) );
+				if( p0 == typeof(int) && p1 == typeof(int) && ret == typeof(int) ) return TrySetFastNativeDelegate( t, method, 6, typeof(Func<int, int, int>) );
+				if( p0 == typeof(long) && p1 == typeof(long) && ret == typeof(long) ) return TrySetFastNativeDelegate( t, method, 8, typeof(Func<long, long, long>) );
+			}
+
+			return false;
+		}
+
 		// WARNING: This DOES NOT appropriately handle templated types.
 		// TODO: IF YOU WANT THIS TO HANDLE TEMPLATE TYPES, YOU MUST DO SO RECURSIVELY.
 		String CheckReplaceTypeNotRecursive( String typeName )
