@@ -50,6 +50,10 @@ namespace Cilbox
 
 	public class CilboxMethod
 	{
+		private static readonly ArrayPool<StackElement> stackPool = ArrayPool<StackElement>.Create();
+		[ThreadStatic] private static StackElement[] singleParameterCache;
+		[ThreadStatic] private static bool singleParameterCacheInUse;
+
 		public CilboxClass parentClass;
 		public int MaxStackSize;
 		public String methodName;
@@ -154,40 +158,68 @@ namespace Cilbox
 
 			int plen = parametersIn?.Length ?? 0;
 			int thisOffset = isStatic ? 0 : 1;
+			int parameterCount = plen + thisOffset;
 
-			StackElement [] parameters = new StackElement[plen+thisOffset];
-			StackElement [] stackBuffer = new StackElement[Cilbox.defaultStackSize];
-
-			if( isStatic )
+			bool usingSingleParameterCache = parameterCount == 1 && !singleParameterCacheInUse;
+			StackElement [] parameters;
+			if( parameterCount == 0 )
 			{
-				for( int p = 0; p < plen; p++ )
-					parameters[p].Load( parametersIn[p] );
+				parameters = Array.Empty<StackElement>();
+			}
+			else if( usingSingleParameterCache )
+			{
+				parameters = singleParameterCache ?? (singleParameterCache = new StackElement[1]);
 			}
 			else
 			{
-				parameters[0].Load( ths );
-				for( int p = 0; p < plen; p++ )
-					parameters[p+1].Load( parametersIn[p] );
-				plen++;
+				parameters = new StackElement[parameterCount];
 			}
 
-			object ret = null;
-			if( !parentClass.box.InterpreterEntry(this) ) return null;
+			StackElement [] stackBuffer = stackPool.Rent(Cilbox.defaultStackSize);
+			if( usingSingleParameterCache ) singleParameterCacheInUse = true;
+
 			try
 			{
-				ret = InterpretInner( stackBuffer, parameters ).AsObject();
-			}
-			catch( Exception e )
-			{
-				parentClass.box.InterpreterExit();
-				if( ths != null ) ths.DisableProxy();
-				else parentClass.box.DisableWithReason(e.ToString());
-				if( e is CilboxUnhandledInterpretedException uhe && uhe.Throwee is System.Exception te ) throw te;
-				throw;
-			}
-			parentClass.box.InterpreterExit();
+				if( isStatic )
+				{
+					for( int p = 0; p < plen; p++ )
+						parameters[p].Load( parametersIn[p] );
+				}
+				else
+				{
+					parameters[0].Load( ths );
+					for( int p = 0; p < plen; p++ )
+						parameters[p+1].Load( parametersIn[p] );
+					plen++;
+				}
 
-			return ret;
+				object ret = null;
+				if( !parentClass.box.InterpreterEntry(this) ) return null;
+				try
+				{
+					ret = InterpretInner( stackBuffer, parameters ).AsObject();
+				}
+				catch( Exception e )
+				{
+					parentClass.box.InterpreterExit();
+					if( ths != null ) ths.DisableProxy();
+					else parentClass.box.DisableWithReason(e.ToString());
+					if( e is CilboxUnhandledInterpretedException uhe && uhe.Throwee is System.Exception te ) throw te;
+					throw;
+				}
+				parentClass.box.InterpreterExit();
+
+				return ret;
+			}
+			finally
+			{
+				if( usingSingleParameterCache )
+				{
+					parameters[0] = default;
+					singleParameterCacheInUse = false;
+				}
+				stackPool.Return(stackBuffer, clearArray: true);
+			}
 		}
 
 		private StackElement InterpretInner( ArraySegment<StackElement> stackBufferIn, ArraySegment<StackElement> parametersIn )
@@ -445,14 +477,18 @@ spiperf.Begin();
 							object callthis = null;
 							Type[] paTypes = dt.nativeParameterTypes;
 							int numFields = paTypes.Length;
-							object [] callpar = new object[numFields];
-							StackElement [] callpar_se = new StackElement[numFields];
+							object [] callpar = numFields == 0 ? Array.Empty<object>() : new object[numFields];
+							StackElement [] callpar_se = null;
 
 							int ik;
 							for( ik = 0; ik < numFields; ik++ )
 							{
 								StackElement se = stackBuffer[sp--];
-								callpar_se[numFields-ik-1] = se;
+								if( se.type == StackType.Address || se.type == StackType.NativeHandle )
+								{
+									callpar_se ??= new StackElement[numFields];
+									callpar_se[numFields-ik-1] = se;
+								}
 								object o = se.AsObject(box);
 								Type t = paTypes[numFields-ik-1];
 
@@ -600,16 +636,15 @@ spiperf.Begin();
 							}
 
 							// Possibly copy back any references.
-							for( ik = 0; ik < numFields; ik++ )
+							if( callpar_se != null )
 							{
-								StackElement se = callpar_se[ik];
-								if (se.type == StackType.Address)
+								for( ik = 0; ik < numFields; ik++ )
 								{
-									callpar_se[ik].DereferenceLoadAddress( callpar[ik] );
-								}
-								else if ( se.type == StackType.NativeHandle )
-								{
-									callpar_se[ik].DereferenceLoadNativeHandle( box, callpar[ik] );
+									StackElement se = callpar_se[ik];
+									if (se.type == StackType.Address)
+										callpar_se[ik].DereferenceLoadAddress( callpar[ik] );
+									else if (se.type == StackType.NativeHandle)
+										callpar_se[ik].DereferenceLoadNativeHandle( box, callpar[ik] );
 								}
 							}
 
