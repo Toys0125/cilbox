@@ -1416,9 +1416,15 @@ spiperf.Begin();
 						{
 						// The opcode determines the stack type.  The hard casts also accept CLR-compatible
 						// arrays (signedness variants like int[]/uint[], enum arrays as their underlying
-						// type), so they need no per-array-type handling.
-						case 0: stackBuffer[sp].LoadSByte( ((sbyte[])arr)[index] ); break; // ldelem.i1
-						case 1: stackBuffer[sp].LoadByte( ((byte[])arr)[index] ); break; // ldelem.u1
+						// type), except bool[] which needs explicit conversion.
+						case 0: // ldelem.i1
+							if( arr is bool[] boolArrI1 ) stackBuffer[sp].LoadBool( boolArrI1[index] );
+							else stackBuffer[sp].LoadSByte( ((sbyte[])arr)[index] );
+							break;
+						case 1: // ldelem.u1
+							if( arr is bool[] boolArrU1 ) stackBuffer[sp].LoadBool( boolArrU1[index] );
+							else stackBuffer[sp].LoadByte( ((byte[])arr)[index] );
+							break;
 						case 2: stackBuffer[sp].LoadShort( ((short[])arr)[index] ); break; // ldelem.i2
 						case 3: // ldelem.u2 (used for UInt16/Char element arrays; char[] does not cast to ushort[])
 							if( arr is char[] charArr )
@@ -1510,7 +1516,11 @@ spiperf.Begin();
 						switch( b - 0x9b )
 						{
 						case 0: asArr.SetValue( (nint)valSE.l, index ); break; // stelem.i
-						case 1: asArr.SetValue( (byte)(SByte)valSE.i, index ); break; // stelem.i1
+						case 1: // stelem.i1
+							if( asArr is bool[] boolArr ) boolArr[index] = valSE.i != 0;
+							else if( asArr is byte[] byteArr ) byteArr[index] = (byte)valSE.i;
+							else ((sbyte[])asArr)[index] = (sbyte)valSE.i;
+							break;
 						case 2: // stelem.i2 (used for Int16/UInt16/Char element arrays)
 							if( arrSE.o is ushort[] ushortArr )
 								ushortArr[index] = (ushort)valSE.u;

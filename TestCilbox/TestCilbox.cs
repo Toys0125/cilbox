@@ -29,6 +29,7 @@ namespace TestCilbox
 			"System.Action",
 			"System.Boolean",
 			"System.Byte",
+			"System.SByte",
 			"System.Char",
 			"System.Collections.Generic.Dictionary",
 			"System.Comparison",
@@ -755,6 +756,15 @@ namespace TestCilbox
 			Validator.Validate("Byte Array With Data 0", "42");
 			Validator.Validate("Byte Array With Data 1", "64");
 			Validator.Validate("Byte Array With Data 2", "255");
+
+			Validator.Validate("Sbyte Array Assigned 0", "-1");
+			Validator.Validate("Sbyte Array Assigned 1", sbyte.MinValue.ToString());
+			Validator.Validate("Sbyte Array Assigned 2", sbyte.MaxValue.ToString());
+
+			Validator.Validate("Bool Array Assigned 0", "False");
+			Validator.Validate("Bool Array Assigned 1", "True");
+			Validator.Validate("Bool Array Branch", "True");
+			Validator.Validate("Bool Array Boxed", "True");
 
 			Validator.Validate("Float Array Assigned Length", "3");
 			Validator.Validate("Float Array Assigned 0", "1.5");

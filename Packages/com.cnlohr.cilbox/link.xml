@@ -6,6 +6,7 @@
 		<type fullname="System.Array" preserve="all"/>
 		<type fullname="System.Boolean" preserve="all"/>
 		<type fullname="System.Byte" preserve="all"/>
+		<type fullname="System.SByte" preserve="all"/>
 		<type fullname="System.Char" preserve="all"/>
 		<type fullname="System.DateTime" preserve="all"/>
 		<type fullname="System.DayOfWeek" preserve="all"/>

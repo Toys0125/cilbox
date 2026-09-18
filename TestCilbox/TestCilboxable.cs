@@ -484,6 +484,22 @@ namespace TestCilbox
 			Validator.Set("Byte Array With Data 1", byteWithData[1].ToString() );
 			Validator.Set("Byte Array With Data 2", byteWithData[2].ToString() );
 
+			sbyte[] sbyteAssigned = new sbyte[3];
+			sbyteAssigned[0] = -1;
+			sbyteAssigned[1] = sbyte.MinValue;
+			sbyteAssigned[2] = sbyte.MaxValue;
+			Validator.Set("Sbyte Array Assigned 0", sbyteAssigned[0].ToString() );
+			Validator.Set("Sbyte Array Assigned 1", sbyteAssigned[1].ToString() );
+			Validator.Set("Sbyte Array Assigned 2", sbyteAssigned[2].ToString() );
+
+			bool[] boolAssigned = new bool[2];
+			boolAssigned[0] = false;
+			boolAssigned[1] = true;
+			Validator.Set("Bool Array Assigned 0", boolAssigned[0].ToString() );
+			Validator.Set("Bool Array Assigned 1", boolAssigned[1].ToString() );
+			Validator.Set("Bool Array Branch", (boolAssigned[1] && !boolAssigned[0]).ToString() );
+			Validator.Set("Bool Array Boxed", ((object)boolAssigned[1]).ToString() );
+
 			float[] floatAssigned = new float[3];
 			floatAssigned[0] = 1.5f;
 			floatAssigned[1] = 2.25f;
