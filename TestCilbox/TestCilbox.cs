@@ -44,6 +44,7 @@ namespace TestCilbox
 			"System.Exception",
 			"System.Globalization.CultureInfo",
 			"System.IDisposable",
+			"System.IComparable",
 			"System.IFormatProvider",
 			"System.IndexOutOfRangeException",
 			"System.Int16",
@@ -95,6 +96,8 @@ namespace TestCilbox
 		};
 
 		static HashSet<String> whiteListField = new HashSet<String>(){
+			"System.Numerics.Vector2.X",
+			"System.Numerics.Vector2.Y",
 			"UnityEngine.Vector3.x",
 			"UnityEngine.Vector3.y",
 			"UnityEngine.Vector3.z",
@@ -362,6 +365,9 @@ namespace TestCilbox
 		{
 			Console.OutputEncoding = System.Text.Encoding.UTF8;
 			bool runPerf = false;
+			bool runGistQuirks = Array.IndexOf(args, "--gist-quirks") >= 0;
+			bool runGistTypeof = Array.IndexOf(args, "--gist-typeof") >= 0;
+			bool runGistStaticBox = Array.IndexOf(args, "--gist-static-box") >= 0;
 			foreach( string arg in args )
 			{
 				if( arg == "--perf" )
@@ -429,6 +435,26 @@ namespace TestCilbox
 			GameObject isoSurvivorGo = new GameObject("IsolationSurvivorToProxy");
 			IsolationSurvivorBehaviour isoSurvivor = isoSurvivorGo.CreateComponent<IsolationSurvivorBehaviour>();
 			isoSurvivor.target = isoFault;
+
+			GameObject gistQuirksGo = null;
+			if( runGistQuirks )
+			{
+				gistQuirksGo = new GameObject("GistQuirksToProxy");
+				gistQuirksGo.CreateComponent<GistQuirksBehaviour>();
+			}
+
+			GameObject gistTypeofGo = null;
+			GameObject gistStaticBoxGo = null;
+			if( runGistTypeof )
+			{
+				gistTypeofGo = new GameObject("GistTypeofToProxy");
+				gistTypeofGo.CreateComponent<GistTypeofBehaviour>();
+			}
+			if( runGistStaticBox )
+			{
+				gistStaticBoxGo = new GameObject("GistStaticBoxToProxy");
+				gistStaticBoxGo.CreateComponent<GistStaticBoxFieldBehaviour>();
+			}
 
 			GameObject cbobj = new GameObject("BasicCilbox");
 			Cilbox.Cilbox cb = cbobj.AddComponent<CilboxTester>();
@@ -998,6 +1024,63 @@ namespace TestCilbox
 			Validator.Validate("CustomMethodByName", "ran");
 			Validator.Set("CustomMethodByName Result", $"{(int)res}");
 			Validator.Validate("CustomMethodByName Result", "5");
+
+			if( runGistTypeof || runGistStaticBox )
+			{
+				GameObject probeGo = runGistTypeof ? gistTypeofGo : gistStaticBoxGo;
+				string className = runGistTypeof ? "TestCilbox.GistTypeofBehaviour" : "TestCilbox.GistStaticBoxFieldBehaviour";
+				string methodName = runGistTypeof ? "InspectBoxType" : "InspectStaticField";
+				string expectedResult = runGistTypeof ? "GistTypeofBehaviour" : "True";
+				string key = "Gist " + methodName;
+				try
+				{
+					Cilbox.CilboxProxy p = probeGo.GetComponents<Cilbox.CilboxProxy>()[0];
+					p.RuntimeProxyLoad();
+					object result = cb.GetClass(className).InterpretMethod(p, methodName, Array.Empty<object>());
+					Validator.Set(key, result?.ToString() ?? "<null>");
+				}
+				catch( Exception ex )
+				{
+					Validator.Set(key, ex.GetBaseException().GetType().Name + ": " + ex.GetBaseException().Message);
+				}
+				Validator.Validate(key, expectedResult);
+			}
+
+			if( runGistQuirks )
+			{
+				Cilbox.CilboxProxy gistProxy = gistQuirksGo.GetComponents<Cilbox.CilboxProxy>()[0];
+				CilboxClass gistClass = cb.GetClass("TestCilbox.GistQuirksBehaviour");
+				string[] names = {
+					"StructArrayCompoundAssignment", "UnsignedFloatConversion",
+					"BoolArrayAccess", "UninitializedStructLocal",
+					"StructArrayFieldWrite", "JaggedByteArray",
+					"NullReferenceCast", "AssignableIsInst",
+					"JaggedByteField", "PrivateDefaultInt"
+				};
+				string[] expected = {
+					"<4, 6>", "7.5", "True", "<9, 2>",
+					"<9, 2>", "42", "True", "True",
+					"33", "0"
+				};
+				for( int index = 0; index < names.Length; ++index )
+				{
+					string key = "Gist " + names[index];
+					try
+					{
+						gistProxy.disabled = false;
+						cb.disabled = false;
+						gistProxy.RuntimeProxyLoad();
+						object value = gistClass.InterpretMethod(gistProxy, names[index], Array.Empty<object>());
+						Validator.Set(key, value?.ToString() ?? "<null>");
+					}
+					catch( Exception ex )
+					{
+						string error = ex.GetBaseException().GetType().Name + ": " + ex.GetBaseException().Message;
+						Validator.Set(key, error);
+					}
+					Validator.Validate(key, expected[index]);
+				}
+			}
 
 			return -1 * Validator.NumValidationErrors();
 		}
