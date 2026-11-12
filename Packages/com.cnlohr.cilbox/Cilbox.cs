@@ -8,7 +8,7 @@ using System.Collections.Specialized;
 using System.Collections;
 using System.Runtime.InteropServices;
 using System.Reflection;
-using System.Threading; // At runtime, only used for a lock (Monitor)
+using System.Threading;
 using System.Buffers;
 
 #if UNITY_EDITOR
@@ -156,51 +156,106 @@ namespace Cilbox
 		{
 			if( ths != null && ths.disabled ) return null;
 
-			int plen = parametersIn?.Length ?? 0;
-			int thisOffset = isStatic ? 0 : 1;
-
-			int paramArrayLen = plen+thisOffset;
-			StackElement[] paramStackArray = s_stackElementPool.Rent(paramArrayLen + Cilbox.defaultStackSize);
-
-			ArraySegment<StackElement> parameters  = new (paramStackArray, 0, paramArrayLen);
-			ArraySegment<StackElement> stackBuffer = new (paramStackArray, paramArrayLen, Cilbox.defaultStackSize);
-
-			// Calling parameters[p].Load does not modify the original element in paramStackArray
-			// Use the full paramStackArray assuming that parameters start at index 0
-			if( isStatic )
-			{
-				for( int p = 0; p < plen; p++ )
-					paramStackArray[p].Load( parametersIn[p] );
-			}
-			else
-			{
-				paramStackArray[0].Load( ths );
-				for( int p = 0; p < plen; p++ )
-					paramStackArray[p+1].Load( parametersIn[p] );
-				plen++;
-			}
-
-			object ret = null;
-			if( !parentClass.box.InterpreterEntry(this) ) return null;
+			Cilbox box = parentClass.box;
+			StackElement[] paramStackArray = null;
+			bool entered = false;
 			try
 			{
-				ret = InterpretInner( stackBuffer, parameters ).AsObject();
+				int plen = parametersIn?.Length ?? 0;
+				int thisOffset = isStatic ? 0 : 1;
+				int paramArrayLen = plen + thisOffset;
+				paramStackArray = s_stackElementPool.Rent(paramArrayLen + Cilbox.defaultStackSize);
+				ArraySegment<StackElement> parameters = new (paramStackArray, 0, paramArrayLen);
+				ArraySegment<StackElement> stackBuffer = new (paramStackArray, paramArrayLen, Cilbox.defaultStackSize);
+
+				// Load the backing array: parameters[p].Load would modify a copy.
+				if( !isStatic ) paramStackArray[0].Load( ths );
+				for( int p = 0; p < plen; p++ )
+					paramStackArray[p + thisOffset].Load( parametersIn[p] );
+
+				if( !box.InterpreterEntry(this) ) return null;
+				entered = true;
+				object ret = InterpretInner( stackBuffer, parameters ).AsObject();
+				// Clearing the interpreter stack is CPU work inside the active call.
+				StackElement[] completedStack = paramStackArray;
+				paramStackArray = null;
+				s_stackElementPool.Return(completedStack, true);
+				// Exit always removes its scope, including when its final CPU check throws.
+				entered = false;
+				box.InterpreterExit();
+				return ret;
 			}
 			catch( Exception e )
 			{
-				parentClass.box.InterpreterExit();
-				if( ths != null ) ths.DisableProxy();
-				else parentClass.box.DisableWithReason(e.ToString());
+				if( entered )
+				{
+					entered = false;
+					box.InterpreterExit(false);
+				}
+				CilboxCpuBudgetTimeoutException timeout = FindBudgetTimeout(e);
+				// A callback into another box can exhaust its caller's inclusive budget.
+				// Only the owner of that budget is disabled for this exception.
+				if( timeout == null || ReferenceEquals(timeout.Owner, box) )
+				{
+					if( ths != null ) ths.DisableProxy();
+					else box.DisableWithReason(e.ToString());
+				}
+				if( timeout != null && !ReferenceEquals(timeout, e) )
+					System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(timeout).Throw();
 				if( e is CilboxUnhandledInterpretedException uhe && uhe.Throwee is System.Exception te ) throw te;
 				throw;
 			}
 			finally
 			{
-				s_stackElementPool.Return(paramStackArray, true);
+				if( paramStackArray != null ) s_stackElementPool.Return(paramStackArray, true);
 			}
-			parentClass.box.InterpreterExit();
+		}
 
-			return ret;
+		private static CilboxCpuBudgetTimeoutException FindBudgetTimeout(object exception)
+		{
+			while( true )
+			{
+				if( exception is CilboxCpuBudgetTimeoutException timeout ) return timeout;
+				if( exception is TargetInvocationException invocation && invocation.InnerException != null )
+					exception = invocation.InnerException;
+				else if( exception is CilboxUnhandledInterpretedException interpreted )
+					exception = interpreted.Throwee;
+				else
+					return null;
+			}
+		}
+
+		private StackElement InterpretNested(Cilbox caller, ArraySegment<StackElement> stackBufferIn, ArraySegment<StackElement> parametersIn)
+		{
+			Cilbox box = parentClass.box;
+			if( ReferenceEquals(box, caller) ) return InterpretInner(stackBufferIn, parametersIn);
+
+			// Virtual dispatch may select a receiver belonging to a different box.
+			// That box needs its own inclusive scope; ordinary internal calls reuse ours.
+			bool entered = false;
+			try
+			{
+				if( !box.InterpreterEntry(this) ) return StackElement.nil;
+				entered = true;
+				StackElement result = InterpretInner(stackBufferIn, parametersIn);
+				entered = false;
+				box.InterpreterExit();
+				return result;
+			}
+			catch( Exception e )
+			{
+				if( entered ) box.InterpreterExit(false);
+				CilboxCpuBudgetTimeoutException timeout = FindBudgetTimeout(e);
+				// Ordinary interpreted exceptions can still be handled by the caller.
+				// This private boundary disables only the owner of a CPU timeout.
+				if( timeout != null && ReferenceEquals(timeout.Owner, box) )
+				{
+					CilboxProxy proxy = isStatic ? null : parametersIn[0].AsObject() as CilboxProxy;
+					if( proxy != null ) proxy.DisableProxy();
+					else box.DisableWithReason(e.ToString());
+				}
+				throw;
+			}
 		}
 
 		private StackElement InterpretInner( ArraySegment<StackElement> stackBufferIn, ArraySegment<StackElement> parametersIn )
@@ -214,6 +269,7 @@ namespace Cilbox
 #endif
 
 			Cilbox box = parentClass.box;
+			CilboxExecutionBudget.ThreadState executionThread = CilboxExecutionBudget.CurrentThreadState;
 
 			int localVarsHead = MaxStackSize;
 			int stackContinues = localVarsHead + methodLocals.Length;
@@ -239,22 +295,10 @@ namespace Cilbox
 			{
 				do
 				{
-					// While this is not threadsafe, that's OK.  This is more for broad strokes.
-					// We don't have to worry about critical pieces going in/out of a race condition
-					// for instance, interpreterAccountingLastStart can't go wonky on us.
-					//
-					// If you use Interlocked.Add() it slows the whole emulator down by about 40%!
-					long steps = ++box.interpreterInstructionsCount;
-					if( ( steps & 0x3f ) == 0 )
-					{
-						long now = System.Diagnostics.Stopwatch.GetTimestamp();
-						if( now > box.interpreterAccountingDropDead )
-						{
-							box.interpreterAccountingCumulitiveTicks = now + box.timeoutLengthUs * box.interpreterTicksInUs - box.interpreterAccountingDropDead;
-							cont = false;
-							throw new CilboxInterpreterTimeoutException( "Script time resources overutilized (Timeout Us: " + box.interpreterAccountingCumulitiveTicks / box.interpreterTicksInUs + "/" + box.timeoutLengthUs + " )", parentClass.className, methodName, pc);
-						}
-					}
+					// A thread-local counter also covers reentrant calls without a shared
+					// increment on every instruction. The usual check reads only Stopwatch.
+					if( ( ++executionThread.Instructions & 0x3f ) == 0 )
+						CilboxExecutionBudget.Checkpoint(executionThread, this, pc);
 
 					byte b = byteCode[pc];
 
@@ -410,7 +454,7 @@ spiperf.Begin();
 									stackBuffer[nextParameterStart].LoadObject( newObj );
 									try
 									{
-										targetMethod.InterpretInner(stackBufferIn.Slice(nextStackHead), stackBufferIn.Slice(nextParameterStart, numParams + staticOffset));
+										targetMethod.InterpretNested(box, stackBufferIn.Slice(nextStackHead), stackBufferIn.Slice(nextParameterStart, numParams + staticOffset));
 									}
 									catch (CilboxUnhandledInterpretedException e)
 									{
@@ -432,9 +476,9 @@ spiperf.Begin();
 										try
 										{
 											if (!isVoid && !ctorAsCall)
-												stackBuffer[++sp] = targetMethod.InterpretInner(stackBufferIn.Slice(nextStackHead), stackBufferIn.Slice(nextParameterStart, numParams + staticOffset));
+												stackBuffer[++sp] = targetMethod.InterpretNested(box, stackBufferIn.Slice(nextStackHead), stackBufferIn.Slice(nextParameterStart, numParams + staticOffset));
 											else
-												targetMethod.InterpretInner(stackBufferIn.Slice(nextStackHead), stackBufferIn.Slice(nextParameterStart, numParams + staticOffset));
+												targetMethod.InterpretNested(box, stackBufferIn.Slice(nextStackHead), stackBufferIn.Slice(nextParameterStart, numParams + staticOffset));
 										}
 										catch (CilboxUnhandledInterpretedException e)
 										{
@@ -641,6 +685,9 @@ spiperf.Begin();
 							}
 						}
 
+						// Native work can spend the whole allowance in a single instruction.
+						if( dt.isNative || dt.shim != null )
+							CilboxExecutionBudget.Checkpoint(executionThread, this, currentInstruction);
 						break;
 					}
 					case 0x2a: cont = false; break; // ret
@@ -1864,6 +1911,13 @@ spiperf.End();
 
 			void interpretedThrow(int currentInstruction, object thrownObj)
 			{
+				// Resource exhaustion is a host control signal, including when a native
+				// callback wrapped it in TargetInvocationException. Script catch blocks
+				// must not turn a timeout into permission to keep running.
+				CilboxCpuBudgetTimeoutException timeout = FindBudgetTimeout(thrownObj);
+				if( timeout != null )
+					System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(timeout).Throw();
+				CilboxExecutionBudget.Checkpoint(this, currentInstruction);
 				sp = -1;
 				exceptionRegister = new StackElement() { type = StackType.Object, o = thrownObj };
 				if (!hasExceptionClauses)
@@ -2262,19 +2316,37 @@ spiperf.End();
 		[SerializeField][FormerlySerializedAs("timeoutLengthUs")] private long desiredTimeoutLengthUs = 500000; // 500ms Can be changed by specific Cilbox instance.
 		public long timeoutLengthUs
 		{
-			get => desiredTimeoutLengthUs;
-			set => desiredTimeoutLengthUs = Math.Min(value, MaxTimeoutLengthUs);
+			get => Volatile.Read(ref desiredTimeoutLengthUs);
+			set => Volatile.Write(ref desiredTimeoutLengthUs, Math.Min(value, MaxTimeoutLengthUs));
 		}
 
 		public virtual long MaxTimeoutLengthUs => 1000000; // 1 second. Can be overridden by specific Cilbox application.
 
+		// Diagnostic mirrors, not the budget's synchronization state. Accounting ticks
+		// are nanoseconds. DropDead is retained as zero for source compatibility:
+		// each executing thread now has its own private Stopwatch guard deadline.
 		[HideInInspector] public uint interpreterAccountingDepth = 0;
 		[HideInInspector] public long interpreterAccountingDropDead = 0;
 		[HideInInspector] public long interpreterAccountingCumulitiveTicks = 0;
 		[HideInInspector] public long interpreterInstructionsCount = 0;
-		[HideInInspector] public long interpreterTicksInUs = System.Diagnostics.Stopwatch.Frequency / 1000000;
+		[HideInInspector] public long interpreterTicksInUs = 1000;
 
 		public long usSpentLastFrame = 0;
+
+		private CilboxExecutionBudget executionBudget;
+		internal CilboxExecutionBudget ExecutionBudget
+		{
+			get
+			{
+				CilboxExecutionBudget budget = Volatile.Read(ref executionBudget);
+				if( budget != null ) return budget;
+				budget = new CilboxExecutionBudget(this);
+				return Interlocked.CompareExchange(ref executionBudget, budget, null) ?? budget;
+			}
+		}
+
+		// Includes the reason when precise CPU accounting is unavailable.
+		public string executionTimeClock => ExecutionBudget.ClockDescription;
 
 		public Cilbox()
 		{
@@ -2572,71 +2644,28 @@ spiperf.End();
 
 		public bool InterpreterEntry( CilboxMethod m )
 		{
-			// Use of Monitor.Lock's here slows the whole emulator down by about 8%
-			// TODO: Consider some sort of lockless approach.  This is tricky because
-			// you need to make sure you interlock both depth, and, time accounting.
-			long now = System.Diagnostics.Stopwatch.GetTimestamp();
-			Monitor.Enter( this );
-			if( ++interpreterAccountingDepth == 1 )
-			{
-				// First entry, if we've been disabled, quiety abort.
-				// this is normal if
-				if( disabled )
-				{
-					--interpreterAccountingDepth;
-					Monitor.Exit( this );
-					return false;
-				}
-				interpreterInstructionsCount = 0;
-				interpreterAccountingDropDead = now + timeoutLengthUs * interpreterTicksInUs - interpreterAccountingCumulitiveTicks;
-				Monitor.Exit( this );
-				return true;
-			}
-			else if( disabled )
-			{
-				// fault from within, abort now.
-				Monitor.Exit( this );
-				throw new CilboxException( $"Function interpreation happened while box was disabled. This should not be possible. Offender: {m.parentClass.className} {m.fullSignature}" );
-			}
-			else
-			{
-				if( now > interpreterAccountingDropDead )
-				{
-					interpreterAccountingCumulitiveTicks = now + timeoutLengthUs * interpreterTicksInUs - interpreterAccountingDropDead;
-					--interpreterAccountingDepth;
-					Monitor.Exit( this );
-					throw new CilboxException( $"Function {m.parentClass.className} {m.fullSignature} timed out." );
-				}
-
-				// Otherwise we are recursively being called. All is well.
-				Monitor.Exit( this );
-				return true;
-			}
+			if( disabled ) return false;
+			ExecutionBudget.Enter(m);
+			return true;
 		}
 
 		public void InterpreterExit()
 		{
-			Monitor.Enter( this );
-			if( --interpreterAccountingDepth == 0 )
-			{
-				long now = System.Diagnostics.Stopwatch.GetTimestamp();
-				long elapsed = now + timeoutLengthUs * interpreterTicksInUs - interpreterAccountingDropDead - interpreterAccountingCumulitiveTicks;
-				interpreterAccountingCumulitiveTicks = now + timeoutLengthUs * interpreterTicksInUs - interpreterAccountingDropDead;
+			InterpreterExit(true);
+		}
 
-				// For profiling
-				if( showFunctionProfiling )
-				{
-					Monitor.Exit( this );
-					Debug.Log( $"{interpreterInstructionsCount} in {elapsed/10}us or {interpreterInstructionsCount*10.0/(double)elapsed}MHz" );
-					return;
-				}
-			}
-			Monitor.Exit( this );
+		internal void InterpreterExit(bool enforce)
+		{
+			long elapsedNanoseconds = ExecutionBudget.Exit(enforce);
+			if( showFunctionProfiling && elapsedNanoseconds > 0 )
+				Debug.Log($"Cilbox call used {elapsedNanoseconds / 1000.0:F3}us ({ExecutionBudget.ClockDescription})");
 		}
 
 		void Update()
 		{
-			usSpentLastFrame = Interlocked.Exchange( ref interpreterAccountingCumulitiveTicks, 0 ) / interpreterTicksInUs;
+			// Snapshot active threads before clearing the frame so their old CPU
+			// intervals cannot be charged again when they next reach a checkpoint.
+			usSpentLastFrame = ExecutionBudget.ResetFrame() / 1000;
 		}
 
 		internal void DisableWithReason(string reason)

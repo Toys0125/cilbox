@@ -12,9 +12,16 @@
 
 	<ItemGroup>
 		<Compile Include="../Packages/com.cnlohr.cilbox/Cilbox.cs" />
+		<Compile Include="../Packages/com.cnlohr.cilbox/CilboxExecutionBudget.cs" />
+		<Compile Include="../Packages/com.cnlohr.cilbox/CilboxThreadCpuClock.cs" />
 		<Compile Include="../Packages/com.cnlohr.cilbox/CilboxProxy.cs" />
         <Compile Include="../Packages/com.cnlohr.cilbox/CilboxSerialization.cs" />
 		<Compile Include="../Packages/com.cnlohr.cilbox/CilboxUtil.cs" />
 		<Compile Include="../Packages/com.cnlohr.cilbox/CilboxUsage.cs" />
+	</ItemGroup>
+	<ItemGroup>
+		<None Include="../Packages/com.cnlohr.cilbox/Plugins/x86_64/CilboxCpuClockWin64.dll"
+		      Link="CilboxCpuClockWin64.dll" CopyToOutputDirectory="PreserveNewest"
+		      Condition="Exists('../Packages/com.cnlohr.cilbox/Plugins/x86_64/CilboxCpuClockWin64.dll')" />
 	</ItemGroup>
 </Project>

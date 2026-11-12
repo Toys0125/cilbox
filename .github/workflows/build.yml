@@ -16,6 +16,8 @@ jobs:
       run: dotnet build --configuration Release
     - name: Test
       run: TestCilbox/bin/Release/net8.0/TestCilbox
+    - name: Test CPU execution budgets
+      run: dotnet run --project TestCilboxCpuBudget/TestCilboxCpuBudget.csproj --configuration Release
     - name: "Produce cilbox unitypackage."
       timeout-minutes: 5
       run:
@@ -26,5 +28,16 @@ jobs:
         name: unitypackage_upload
         path: |
           com.cnlohr.cilbox.unitypackage
+
+  windows-cpu-budgets:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.x'
+    - name: Test Windows thread CPU clock and execution budgets
+      run: dotnet run --project TestCilboxCpuBudget/TestCilboxCpuBudget.csproj --configuration Release
 
 

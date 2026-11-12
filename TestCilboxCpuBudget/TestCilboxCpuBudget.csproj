@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework Condition="'$(TargetFramework)' == ''">net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <StartupObject>TestCilboxCpuBudget.Program</StartupObject>
+    <NoWarn>8600,8601,8602,8603,8604,8618,8765,8625</NoWarn>
+    <DefineConstants>UNITY_EDITOR</DefineConstants>
+    <DefineConstants Condition="'$(Baseline)' == 'true'">UNITY_EDITOR;BASELINE</DefineConstants>
+    <CilboxSourceRoot Condition="'$(CilboxSourceRoot)' == ''">../Packages/com.cnlohr.cilbox</CilboxSourceRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="AccountingTests.cs" Condition="'$(Baseline)' != 'true'" />
+    <Compile Include="../TestCilbox/UnityEngine.cs" />
+    <Compile Include="../TestCilbox/TestCilbox.cs" />
+    <Compile Include="../TestCilbox/TestCilboxable.cs" />
+    <Compile Include="$(CilboxSourceRoot)/*.cs" />
+    <None Include="../Packages/com.cnlohr.cilbox/Plugins/x86_64/CilboxCpuClockWin64.dll" Condition="Exists('../Packages/com.cnlohr.cilbox/Plugins/x86_64/CilboxCpuClockWin64.dll')" CopyToOutputDirectory="PreserveNewest" Link="CilboxCpuClockWin64.dll" />
+  </ItemGroup>
+  <Target Name="BuildNativeProbe" BeforeTargets="Build" Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+    <Exec Command="cc -O2 -shared -fPIC -Wall -Wextra -Werror &quot;$(MSBuildProjectDirectory)/native_work.c&quot; -o &quot;$(TargetDir)libcilboxbudgetprobe.so&quot;" />
+  </Target>
+</Project>

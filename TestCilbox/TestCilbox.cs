@@ -506,7 +506,8 @@ namespace TestCilbox
 
 			try
 			{
-				// Ensure 50ms timeout for the Update test.
+				// Start a fresh frame before testing the smaller Update allowance.
+				typeof(Cilbox.Cilbox).GetMethod("Update", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(cb, null);
 				cb.timeoutLengthUs = 50000; // 50ms
 				// In case assembly is still being generated.
 				proxy.GetType().GetMethod("Update",BindingFlags.Instance|BindingFlags.NonPublic,Type.EmptyTypes).Invoke( proxy, new object[0] );
@@ -534,6 +535,8 @@ namespace TestCilbox
 			cb.timeoutLengthUs = 3000000; // should be over max
 			Validator.Set("Real timeoutLengthUs", cb.timeoutLengthUs.ToString() );
 			Validator.Validate("Real timeoutLengthUs", cb.MaxTimeoutLengthUs.ToString() );
+			// The remaining proxy tests run in the next frame, after the overrun.
+			typeof(Cilbox.Cilbox).GetMethod("Update", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(cb, null);
 
 			Validator.Validate( "Proxy Disabled After Timeout", "True" );
 			Validator.Validate( "Execution after timeout", "disabled" );

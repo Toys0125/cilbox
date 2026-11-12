@@ -73,14 +73,39 @@ For additional information:
 
 ### Resource accounting
 
-While a cilbox is executing, every 64 cycles it reports back to the owning box that it is using CPU time.  If the amount of time spent executing that cilbox per frame exceeds `timeoutLengthUs`, then the script will be killed at the next 64-cycle checkin.
+`timeoutLengthUs` is a cumulative allowance per box between its existing Unity `Update()` frame resets. The default remains 500 ms, and avatars retain their 5 ms limit.
 
-Execution time encompasses all time that is spent while there is a cilbox execution context.  For example, if your cilbox calls a Unity function, while it is within the unity function, it will be accounted against your script.  If your script is executing, and another method is called from a thread concurrently, then that time is only single-accounted.
+Every 64 interpreted instructions, the interpreter checks a cheap Stopwatch guard. When that guard expires, it reads the executing thread's CPU clock and throws a timeout only if the accumulated CPU allowance has actually been exceeded. A wait or descheduling pause can expire the guard without exhausting the allowance; the next guard then uses the CPU time still available. CPU already consumed earlier in the frame is retained.
 
-By default, `timeoutLengthUs` is 500ms.  For Avatars, 5ms.
+Calls also settle CPU at entry and exit. Native/shim returns check the guard immediately, so a CPU-heavy native call followed by `ret`, or several short calls adding up to the limit, cannot avoid enforcement. A synchronous native call cannot be interrupted while it is running; its overrun is detected when control returns.
 
-If execution within a box is exceeded, the box is disabled.  The box can be re-enabled by setting a flag on the box, to re-enable it, but in general, it should be expected to stay off, unless the asset is unloaded.
+Accounting includes interpreter work and synchronous native work, including Unity or GC work that runs on the active thread. Sleeping, blocking and time when that thread is descheduled do not count with a supported CPU clock. Work on unrelated Unity/GC worker threads is not charged to the caller's thread budget.
 
+Recursion and reentry into the same box count each CPU interval once. Concurrent threads contribute the sum of their CPU usage to the shared box budget. Nested calls between different boxes use inclusive attribution: the caller and callee each include that call, so their reports must not be added together as a process-wide CPU total. This accounting does not make Unity APIs or other interpreter data structures safe for arbitrary concurrent use.
+
+A frame reset samples all active threads before publishing the completed frame and rebasing their CPU baselines. An overrun already observed in an active call remains latched across that reset until the call unwinds.
+
+#### Clock support and reporting
+
+| Runtime platform | CPU clock |
+| --- | --- |
+| Windows x64, including Unity Mono, IL2CPP and CoreCLR | `QueryThreadCycleTime`, converted using the bundled native helper's locally calibrated invariant-TSC frequency, after platform and clock qualification. |
+| 64-bit Linux and 64-bit Android | A bound POSIX thread CPU clock from `pthread_getcpuclockid` and `clock_gettime`. |
+| Other platforms, missing native helper, or failed startup qualification | Explicit Stopwatch fallback, with a warning and a diagnostic clock description. Pauses can still count in this mode. |
+
+The Windows helper is supplied as a Windows x64 Unity plugin alongside its [source and reproducible build instructions](Packages/com.cnlohr.cilbox/Native~/README.md). It does not use coarse `GetThreadTimes`, an advertised CPU GHz value, or `Stopwatch.Frequency` to convert thread cycles. Its startup qualification is performed before scene loading in Unity. See the native documentation for the limits of this conversion and the validation still required on target players.
+
+`executionTimeClock` identifies the selected clock or fallback and retains a mixed-mode diagnostic if the box has used both. `usSpentLastFrame` and function profiling report CPU microseconds when a CPU clock is active. The legacy `interpreterAccountingCumulitiveTicks` diagnostic now uses nanoseconds (`interpreterTicksInUs == 1000`); the legacy `interpreterAccountingDropDead` is retained as zero because guard deadlines are private to each thread. These diagnostic fields no longer control enforcement.
+
+The existing proxy/box disable behavior applies to the owner of an exceeded budget. Timeout exceptions cannot be swallowed by interpreted catch blocks, including after a native callback wraps one in `TargetInvocationException`.
+
+Run the dedicated accounting and interpreter regressions with:
+
+```sh
+dotnet run --project TestCilboxCpuBudget/TestCilboxCpuBudget.csproj -c Release
+```
+
+The [test harness documentation](TestCilboxCpuBudget/README.md) covers alternate CoreCLR versions, clock measurements, and comparison with the previous Stopwatch implementation.
 
 ### Current limitations
  * You still cannot arbitrarily expose a custom method directly to Unity UI / inspector event pickers. Invocation is limited to the entrypoints forwarded by `CilboxProxy`, such as `Awake()`, `Start()`, `FixedUpdate()`, `Update()`, `OnEnable()`, `OnDisable()`, `OnDestroy()`, `OnTriggerEnter/Exit()` and `OnCollisionEnter/Exit()`.
