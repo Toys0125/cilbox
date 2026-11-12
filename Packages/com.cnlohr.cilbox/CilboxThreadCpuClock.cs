@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 
 namespace Cilbox
@@ -14,9 +15,54 @@ namespace Cilbox
         bool TryReadNanoseconds(out long nanoseconds);
     }
 
+    // One preparation barrier precedes every interpreter admission, including
+    // worker-thread and nested entries. Publish all terminal outcomes so a
+    // fallback call can never trigger a later calibration burst.
+    internal sealed class CilboxClockPreparation
+    {
+        private readonly object sync = new object();
+        private readonly Action prepare;
+        private int completed;
+        private bool preparing;
+        private ExceptionDispatchInfo failure;
+
+        internal CilboxClockPreparation(Action prepare)
+        {
+            this.prepare = prepare ?? throw new ArgumentNullException(nameof(prepare));
+        }
+
+        internal void EnsurePrepared()
+        {
+            if (Volatile.Read(ref completed) == 0)
+            {
+                lock (sync)
+                {
+                    if (completed == 0)
+                    {
+                        if (preparing)
+                            throw new InvalidOperationException("Cannot enter Cilbox during CPU clock preparation.");
+                        preparing = true;
+                        try { prepare(); }
+                        catch (Exception error) { failure = ExceptionDispatchInfo.Capture(error); }
+                        finally
+                        {
+                            preparing = false;
+                            Volatile.Write(ref completed, 1);
+                        }
+                    }
+                }
+            }
+            // An unexpected preparation error rejects admission consistently;
+            // it must not become an unbounded retry on subsequent calls.
+            failure?.Throw();
+        }
+    }
+
     internal static class CilboxThreadCpuClock
     {
         private static int fallbackWarningReported;
+        private static readonly CilboxClockPreparation preparation = new CilboxClockPreparation(PreparePlatformClock);
+        private static string windowsPreparationFailure;
         private const long NanosecondsPerSecond = 1000000000;
         private const long MaximumResolutionNanoseconds = 100000; // 0.1 ms.
 
@@ -36,8 +82,40 @@ namespace Cilbox
         }
 #endif
 
+        internal static void EnsurePreparedForExecution()
+        {
+            preparation.EnsurePrepared();
+        }
+
+        private static void PreparePlatformClock()
+        {
+            // Do not log here: log listeners can call back into Cilbox. The
+            // barrier must publish completion before a fallback emits a warning.
+            try
+            {
+                if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+                if (RuntimeInformation.ProcessArchitecture != Architecture.X64
+                    || RuntimeInformation.OSArchitecture != Architecture.X64)
+                {
+                    windowsPreparationFailure = "the qualified Windows CPU clock requires native x64 Windows";
+                    return;
+                }
+
+                ulong frequency;
+                int status = cilbox_cpu_clock_frequency(out frequency);
+                if (status != 0 || frequency == 0)
+                    windowsPreparationFailure = "Windows invariant-TSC clock qualification failed ("
+                        + status + ") after bounded startup qualification";
+            }
+            catch (DllNotFoundException exception) { windowsPreparationFailure = exception.Message; }
+            catch (EntryPointNotFoundException exception) { windowsPreparationFailure = exception.Message; }
+            catch (BadImageFormatException exception) { windowsPreparationFailure = exception.Message; }
+            catch (PlatformNotSupportedException exception) { windowsPreparationFailure = exception.Message; }
+        }
+
         internal static ICilboxThreadCpuClock OpenCurrentThread()
         {
+            EnsurePreparedForExecution();
             try
             {
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -108,14 +186,15 @@ namespace Cilbox
 
         private static ICilboxThreadCpuClock OpenWindowsClock()
         {
-            if (RuntimeInformation.ProcessArchitecture != Architecture.X64
-                || RuntimeInformation.OSArchitecture != Architecture.X64)
-                return OpenStopwatchFallback("the qualified Windows CPU clock requires native x64 Windows");
+            if (windowsPreparationFailure != null)
+                return OpenStopwatchFallback(windowsPreparationFailure);
 
+            // The startup barrier has completed. Reader creation can only query
+            // the published result; this export never initializes or retries.
             ulong frequency;
-            int status = cilbox_cpu_clock_frequency(out frequency);
+            int status = cilbox_cpu_clock_cached_frequency(out frequency);
             if (status != 0 || frequency == 0)
-                return OpenStopwatchFallback("Windows invariant-TSC clock qualification failed (" + status + ")");
+                return OpenStopwatchFallback("Windows CPU clock has no qualified cached frequency (" + status + ")");
 
             IntPtr process = GetCurrentProcess();
             IntPtr handle;
@@ -253,6 +332,9 @@ namespace Cilbox
 
         [DllImport("CilboxCpuClockWin64", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         private static extern int cilbox_cpu_clock_frequency(out ulong ticksPerSecond);
+
+        [DllImport("CilboxCpuClockWin64", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        private static extern int cilbox_cpu_clock_cached_frequency(out ulong ticksPerSecond);
 
         [DllImport("kernel32.dll", ExactSpelling = true)]
         private static extern IntPtr GetCurrentProcess();

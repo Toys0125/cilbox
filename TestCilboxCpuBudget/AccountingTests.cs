@@ -28,6 +28,7 @@ namespace TestCilboxCpuBudget
         private sealed class ManualClocks : IDisposable
         {
             private readonly Func<ICilboxThreadCpuClock> oldFactory = CilboxExecutionBudget.ClockFactory;
+            private readonly Action oldPreparation = CilboxExecutionBudget.ClockPreparation;
             private readonly Func<long> oldWall = CilboxExecutionBudget.WallTimestampProvider;
             private readonly long oldFrequency = CilboxExecutionBudget.WallFrequency;
             private readonly ConcurrentDictionary<int, Counter> counters = new();
@@ -35,6 +36,7 @@ namespace TestCilboxCpuBudget
             private long wall = 1_000_000_000;
             internal Counter Current => counters.GetOrAdd(Environment.CurrentManagedThreadId, _ => new Counter());
             internal bool UseCpuMode = true;
+            internal int OpenedReaderCount => readers.Count;
 
             internal ManualClocks()
             {
@@ -54,6 +56,7 @@ namespace TestCilboxCpuBudget
             internal void Wait(long nanoseconds) => Interlocked.Add(ref wall, nanoseconds);
             public void Dispose()
             {
+                CilboxExecutionBudget.ClockPreparation = oldPreparation;
                 CilboxExecutionBudget.ClockFactory = oldFactory;
                 CilboxExecutionBudget.WallTimestampProvider = oldWall;
                 CilboxExecutionBudget.WallFrequency = oldFrequency;
@@ -79,6 +82,199 @@ namespace TestCilboxCpuBudget
 
         public static void Run(Action<string, Action> run)
         {
+            run("preparation_serializes_concurrent_admission_before_any_active_scope", () => {
+                using var clock = new ManualClocks();
+                var owner = Program.NewBox(100_000);
+                var method = Empty(owner);
+                using var requested = new CountdownEvent(2);
+                using var preparing = new ManualResetEventSlim();
+                using var releasePreparation = new ManualResetEventSlim();
+                using var admitted = new CountdownEvent(2);
+                using var finish = new ManualResetEventSlim();
+                var failures = new ConcurrentQueue<Exception>();
+                int preparations = 0;
+                var preparation = new CilboxClockPreparation(() => {
+                    Interlocked.Increment(ref preparations);
+                    preparing.Set();
+                    Program.Require(releasePreparation.Wait(TimeSpan.FromSeconds(5)),
+                        "Preparation release barrier timed out.");
+                });
+                CilboxExecutionBudget.ClockPreparation = () => {
+                    requested.Signal();
+                    preparation.EnsurePrepared();
+                };
+                ThreadStart worker = () => {
+                    bool entered = false;
+                    try
+                    {
+                        owner.ExecutionBudget.Enter(method);
+                        entered = true;
+                        admitted.Signal();
+                        Program.Require(finish.Wait(TimeSpan.FromSeconds(5)),
+                            "Prepared worker finish barrier timed out.");
+                    }
+                    catch (Exception error) { failures.Enqueue(error); }
+                    finally { if (entered) owner.ExecutionBudget.Exit(false); }
+                };
+                Thread[] workers = {
+                    new Thread(worker) { IsBackground = true },
+                    new Thread(worker) { IsBackground = true }
+                };
+                foreach (Thread workerThread in workers) workerThread.Start();
+                try
+                {
+                    Program.Require(requested.Wait(TimeSpan.FromSeconds(5)) &&
+                        preparing.Wait(TimeSpan.FromSeconds(5)),
+                        "Workers did not reach preparation before admission.");
+                    Program.Require(SpinWait.SpinUntil(() => workers.All(workerThread =>
+                        (workerThread.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0),
+                        TimeSpan.FromSeconds(5)), "Preparation workers did not reach a blocked state.");
+                    Program.Require(owner.ExecutionBudget.ActiveDepth == 0 &&
+                        clock.OpenedReaderCount == 0 && admitted.CurrentCount == 2,
+                        "A reader or active scope was created before preparation completed.");
+                    Program.Require(Volatile.Read(ref preparations) == 1,
+                        "Concurrent admission ran preparation more than once.");
+                    releasePreparation.Set();
+                    Program.Require(admitted.Wait(TimeSpan.FromSeconds(5)),
+                        "Workers did not enter after preparation completed.");
+                    Program.Require(owner.ExecutionBudget.ActiveDepth == 2 &&
+                        clock.OpenedReaderCount == 2 && Volatile.Read(ref preparations) == 1,
+                        "Prepared concurrent owners did not get separate readers.");
+                }
+                finally
+                {
+                    releasePreparation.Set();
+                    finish.Set();
+                    foreach (Thread workerThread in workers)
+                        Program.Require(workerThread.Join(5000), "Preparation worker failed to exit.");
+                }
+                Program.Require(failures.IsEmpty, "Preparation worker failed: " + string.Join("; ", failures));
+                Program.Require(owner.ExecutionBudget.ActiveDepth == 0,
+                    "Concurrent preparation left an active accounting scope.");
+            });
+
+            run("preparation_cpu_precedes_budget_and_nested_entry_does_not_repeat_it", () => {
+                using var clock = new ManualClocks();
+                var a = Program.NewBox();
+                var b = Program.NewBox();
+                var am = Empty(a, "PreparedA");
+                var bm = Empty(b, "PreparedB");
+                int preparations = 0;
+                var preparation = new CilboxClockPreparation(() => {
+                    ++preparations;
+                    Program.Require(CilboxExecutionBudget.CurrentThreadState.Scopes.Count == 0,
+                        "Preparation ran inside an active call.");
+                    clock.Cpu(8_000_000);
+                });
+                CilboxExecutionBudget.ClockPreparation = preparation.EnsurePrepared;
+                a.ExecutionBudget.Enter(am);
+                try
+                {
+                    clock.Cpu(1_000_000);
+                    b.ExecutionBudget.Enter(bm);
+                    try { clock.Cpu(1_000_000); }
+                    finally { b.ExecutionBudget.Exit(false); }
+                }
+                finally { a.ExecutionBudget.Exit(false); }
+                a.ExecutionBudget.Enter(am);
+                a.ExecutionBudget.Exit(false);
+                Program.Require(preparations == 1,
+                    "Nested or later entry repeated the blocking preparation.");
+                Program.Require(a.ExecutionBudget.CurrentFrameCpuNanoseconds == 2_000_000 &&
+                    b.ExecutionBudget.CurrentFrameCpuNanoseconds == 1_000_000,
+                    "Initialization CPU was charged to a call, or nested CPU was lost.");
+            });
+
+            run("preparation_terminal_fallback_never_retries_or_changes_an_active_clock", () => {
+                using var clock = new ManualClocks();
+                var owner = Program.NewBox(100_000);
+                var method = Empty(owner);
+                int preparations = 0;
+                bool laterQualificationWouldPass = false;
+                var preparation = new CilboxClockPreparation(() => {
+                    ++preparations;
+                    clock.UseCpuMode = laterQualificationWouldPass;
+                });
+                CilboxExecutionBudget.ClockPreparation = preparation.EnsurePrepared;
+                owner.ExecutionBudget.Enter(method);
+                try
+                {
+                    laterQualificationWouldPass = true;
+                    clock.Cpu(1_000_000);
+                    owner.ExecutionBudget.Enter(method);
+                    try { clock.Cpu(1_000_000); }
+                    finally { owner.ExecutionBudget.Exit(false); }
+                    Program.Require(clock.OpenedReaderCount == 1 &&
+                        owner.ExecutionBudget.ClockDescription.Contains("wall fallback"),
+                        "Nested admission replaced or relabeled its active fallback reader.");
+                }
+                finally { owner.ExecutionBudget.Exit(false); }
+                owner.ExecutionBudget.Enter(method);
+                owner.ExecutionBudget.Exit(false);
+                Program.Require(preparations == 1 && !clock.UseCpuMode &&
+                    owner.ExecutionBudget.ClockDescription.Contains("wall fallback"),
+                    "A terminal fallback was retried on a nested or later call.");
+                Program.Require(owner.ExecutionBudget.CurrentFrameCpuNanoseconds == 2_000_000,
+                    "Terminal fallback preparation altered the settled accounting interval.");
+            });
+
+            run("preparation_exception_is_cached_and_rejects_admission_without_retry", () => {
+                using var clock = new ManualClocks();
+                var owner = Program.NewBox();
+                var method = Empty(owner);
+                var original = new InvalidOperationException("Expected preparation failure.");
+                int preparations = 0;
+                var preparation = new CilboxClockPreparation(() => {
+                    ++preparations;
+                    throw original;
+                });
+                CilboxExecutionBudget.ClockPreparation = preparation.EnsurePrepared;
+                for (int attempt = 0; attempt < 3; ++attempt)
+                {
+                    Exception? observed = null;
+                    try { owner.ExecutionBudget.Enter(method); }
+                    catch (Exception error) { observed = error; }
+                    Program.Require(ReferenceEquals(observed, original),
+                        "Preparation did not preserve its terminal exception.");
+                    Program.Require(owner.ExecutionBudget.ActiveDepth == 0 &&
+                        CilboxExecutionBudget.CurrentThreadState.Scopes.Count == 0 &&
+                        clock.OpenedReaderCount == 0,
+                        "Failed preparation admitted a call or opened a reader.");
+                }
+                Program.Require(preparations == 1, "Terminal preparation exception was retried.");
+            });
+
+            run("preparation_reentrant_entry_is_rejected_before_activation", () => {
+                using var clock = new ManualClocks();
+                var owner = Program.NewBox();
+                var method = Empty(owner);
+                int preparations = 0;
+                var preparation = new CilboxClockPreparation(() => {
+                    ++preparations;
+                    if (preparations > 1)
+                        throw new InvalidOperationException("Preparation callback was entered recursively.");
+                    owner.ExecutionBudget.Enter(method);
+                });
+                CilboxExecutionBudget.ClockPreparation = preparation.EnsurePrepared;
+                Exception? original = null;
+                for (int attempt = 0; attempt < 2; ++attempt)
+                {
+                    Exception? observed = null;
+                    try { owner.ExecutionBudget.Enter(method); }
+                    catch (Exception error) { observed = error; }
+                    Program.Require(observed is InvalidOperationException &&
+                        observed.Message.Contains("Cannot enter Cilbox during CPU clock preparation."),
+                        "Recursive initialization did not reject entry with its preparation diagnostic.");
+                    if (attempt == 0) original = observed;
+                    else Program.Require(ReferenceEquals(observed, original),
+                        "Recursive preparation failure was not cached.");
+                }
+                Program.Require(preparations == 1 && clock.OpenedReaderCount == 0 &&
+                    owner.ExecutionBudget.ActiveDepth == 0 &&
+                    CilboxExecutionBudget.CurrentThreadState.Scopes.Count == 0,
+                    "Recursive preparation created a reader, repeated initialization, or leaked a scope.");
+            });
+
             run("deterministic_same_owner_recursion_counts_once", () => {
                 using var clock = new ManualClocks();
                 var owner = Program.NewBox(100_000);

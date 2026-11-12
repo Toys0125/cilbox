@@ -7,31 +7,25 @@
  * qualification, following the constrained approach used by Chromium ThreadTicks.
  *
  * No allocations, CRT, drivers, elevated privileges, or process-wide settings.
- * Initialization performs four short sleeps (normally about 80 ms total) and
- * up to three 2 ms busy checks. Prewarm outside interpreter execution.
+ * One attempt normally includes about 80 ms of sleeps and up to 6 ms of busy
+ * checks. Retryable failures get at most three total attempts, with 20 ms
+ * backoff between attempts. Run preparation before any interpreter activation.
  */
 #define WIN32_LEAN_AND_MEAN
 #define _WIN32_WINNT 0x0601
 #include <windows.h>
 #include <intrin.h>
 #include <stdint.h>
+#include "CilboxCpuClockRetry.h"
 
 #if !defined(_M_X64) && !defined(__x86_64__)
 #error Build this helper for Windows x64 only.
 #endif
 
-enum {
-    CILBOX_CLOCK_OK = 0,
-    CILBOX_CLOCK_UNSUPPORTED_ARCHITECTURE = 1,
-    CILBOX_CLOCK_NO_INVARIANT_TSC = 2,
-    CILBOX_CLOCK_QUERY_FAILED = 3,
-    CILBOX_CLOCK_UNSTABLE_FREQUENCY = 4,
-    CILBOX_CLOCK_THREAD_CYCLES_FAILED_QUALIFICATION = 5
-};
-
 static INIT_ONCE initialize_once = INIT_ONCE_STATIC_INIT;
 static uint64_t qualified_frequency;
-static int qualification_status = CILBOX_CLOCK_QUERY_FAILED;
+static int qualification_status = CILBOX_CLOCK_NOT_PREPARED;
+static volatile LONG initialization_finished;
 
 static uint64_t read_tsc(void)
 {
@@ -69,7 +63,7 @@ static int native_x64_windows(void)
         ? (IsWow64Process2Function)(void*)GetProcAddress(kernel, "IsWow64Process2") : 0;
     if (query) {
         USHORT process_machine, native_machine;
-        if (!query(GetCurrentProcess(), &process_machine, &native_machine)) return 0;
+        if (!query(GetCurrentProcess(), &process_machine, &native_machine)) return -1;
         return native_machine == IMAGE_FILE_MACHINE_AMD64
             && process_machine == IMAGE_FILE_MACHINE_UNKNOWN;
     }
@@ -116,40 +110,36 @@ static int qualify_thread_cycles(uint64_t frequency, LONGLONG qpc_frequency)
     return 0;
 }
 
-static BOOL CALLBACK initialize_clock(PINIT_ONCE once, PVOID parameter, PVOID* context)
+static int qualify_once(void* context, uint64_t* out_frequency)
 {
-    (void)once;
-    (void)parameter;
     (void)context;
 
-    if (!native_x64_windows()) {
-        qualification_status = CILBOX_CLOCK_UNSUPPORTED_ARCHITECTURE;
-        return TRUE;
-    }
+    int architecture = native_x64_windows();
+    if (architecture < 0) return CILBOX_CLOCK_QUERY_FAILED;
+    if (!architecture) return CILBOX_CLOCK_UNSUPPORTED_ARCHITECTURE;
+
     int registers[4];
     __cpuid(registers, (int)0x80000000u);
-    if ((uint32_t)registers[0] < 0x80000007u) {
-        qualification_status = CILBOX_CLOCK_NO_INVARIANT_TSC;
-        return TRUE;
-    }
+    if ((uint32_t)registers[0] < 0x80000007u)
+        return CILBOX_CLOCK_NO_INVARIANT_TSC;
     __cpuid(registers, (int)0x80000007u);
-    if (((uint32_t)registers[3] & (1u << 8)) == 0) {
-        qualification_status = CILBOX_CLOCK_NO_INVARIANT_TSC;
-        return TRUE;
-    }
+    if (((uint32_t)registers[3] & (1u << 8)) == 0)
+        return CILBOX_CLOCK_NO_INVARIANT_TSC;
 
     LARGE_INTEGER qpc_frequency;
     if (!QueryPerformanceFrequency(&qpc_frequency) || qpc_frequency.QuadPart <= 0)
-        return TRUE;
+        return CILBOX_CLOCK_QUERY_FAILED;
 
     double samples[3];
     for (int i = 0; i < 3; ++i) {
         LONGLONG q0, q1;
         uint64_t t0, t1;
-        if (!paired_sample(qpc_frequency.QuadPart, &q0, &t0)) return TRUE;
+        if (!paired_sample(qpc_frequency.QuadPart, &q0, &t0))
+            return CILBOX_CLOCK_QUERY_FAILED;
         Sleep(20);
         if (!paired_sample(qpc_frequency.QuadPart, &q1, &t1)
-            || q1 <= q0 || t1 <= t0) return TRUE;
+            || q1 <= q0 || t1 <= t0)
+            return CILBOX_CLOCK_QUERY_FAILED;
         samples[i] = (double)(t1 - t0) * (double)qpc_frequency.QuadPart
             / (double)(q1 - q0);
     }
@@ -164,27 +154,59 @@ static BOOL CALLBACK initialize_clock(PINIT_ONCE once, PVOID parameter, PVOID* c
             }
     double median = samples[1];
     if (median < 1000000.0 || median > 20000000000.0
-        || samples[0] < median * 0.995 || samples[2] > median * 1.005) {
-        qualification_status = CILBOX_CLOCK_UNSTABLE_FREQUENCY;
-        return TRUE;
-    }
+        || samples[0] < median * 0.995 || samples[2] > median * 1.005)
+        return CILBOX_CLOCK_UNSTABLE_FREQUENCY;
 
     uint64_t frequency = (uint64_t)(median + 0.5);
-    if (!qualify_thread_cycles(frequency, qpc_frequency.QuadPart)) {
-        qualification_status = CILBOX_CLOCK_THREAD_CYCLES_FAILED_QUALIFICATION;
-        return TRUE;
-    }
-    qualified_frequency = frequency;
-    qualification_status = CILBOX_CLOCK_OK;
+    if (!qualify_thread_cycles(frequency, qpc_frequency.QuadPart))
+        return CILBOX_CLOCK_THREAD_CYCLES_FAILED_QUALIFICATION;
+    *out_frequency = frequency;
+    return CILBOX_CLOCK_OK;
+}
+
+static void wait_before_retry(void* context, unsigned int delay_ms)
+{
+    (void)context;
+    Sleep((DWORD)delay_ms);
+}
+
+static BOOL CALLBACK initialize_clock(PINIT_ONCE once, PVOID parameter, PVOID* context)
+{
+    (void)once;
+    (void)parameter;
+    (void)context;
+
+    qualification_status = cilbox_clock_qualify_bounded(
+        qualify_once, wait_before_retry, 0, &qualified_frequency);
+    /* TRUE commits success OR terminal failure. FALSE would let arbitrary later
+     * clock opens trigger more qualification work inside active execution. */
     return TRUE;
 }
 
+/* Initializer ABI retained for startup preparation and standalone native probes.
+ * Callers must exclude all active Cilbox execution while preparing the clock. */
 __declspec(dllexport) int __cdecl cilbox_cpu_clock_frequency(uint64_t* ticks_per_second)
 {
     if (!ticks_per_second) return CILBOX_CLOCK_QUERY_FAILED;
     *ticks_per_second = 0;
     if (!InitOnceExecuteOnce(&initialize_once, initialize_clock, 0, 0))
         return CILBOX_CLOCK_QUERY_FAILED;
+
+    /* Publish only after the initializer callback and its bounded policy finish.
+     * Interlocked operations provide the publication fence for the cached API. */
+    InterlockedExchange(&initialization_finished, 1);
+    *ticks_per_second = qualified_frequency;
+    return qualification_status;
+}
+
+/* Nonblocking lookup: never runs, waits for, or retries initialization.
+ * During preparation it returns NOT_PREPARED and a zero frequency. */
+__declspec(dllexport) int __cdecl cilbox_cpu_clock_cached_frequency(uint64_t* ticks_per_second)
+{
+    if (!ticks_per_second) return CILBOX_CLOCK_QUERY_FAILED;
+    *ticks_per_second = 0;
+    if (InterlockedCompareExchange(&initialization_finished, 0, 0) == 0)
+        return CILBOX_CLOCK_NOT_PREPARED;
     *ticks_per_second = qualified_frequency;
     return qualification_status;
 }

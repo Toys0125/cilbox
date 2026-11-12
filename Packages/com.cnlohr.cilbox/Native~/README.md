@@ -11,7 +11,7 @@ frame-boundary snapshots. Its `Name` and `IsCpuTime` identify the active mode.
 | --- | --- | --- |
 | Linux x64 / ARM64, Mono / IL2CPP / CoreCLR | `pthread_getcpuclockid(pthread_self())` plus `clock_gettime` | User + kernel CPU for the selected thread; requires a 64-bit Linux ABI and advertised resolution at most 0.1 ms. No custom native plugin required. |
 | Android ARM64 | Same POSIX APIs from `libc` | Implemented but needs a device/player validation run; 32-bit ABIs deliberately fall back. |
-| Native Windows x64, Mono / IL2CPP / CoreCLR | `QueryThreadCycleTime` divided by a qualified invariant-TSC rate | Estimated CPU time, supported only when native-x64, invariant-TSC, rate stability, wait exclusion, and busy-scale checks pass. The bundled DLL supplies calibration. Windows runtime/player validation is still required. |
+| Native Windows x64, Mono / IL2CPP / CoreCLR | `QueryThreadCycleTime` divided by a qualified invariant-TSC rate | Estimated CPU time, supported only when native-x64, invariant-TSC, rate stability, wait exclusion, and busy-scale checks pass. The bundled DLL supplies startup-only calibration; validate the selected backend in the actual player. |
 | Windows ARM64, x64 emulation on ARM64, Windows x86 | Stopwatch fallback | No qualified precise thread-time backend; cannot preserve CPU-only semantics. |
 | macOS, iOS, WebGL, other/unknown ABIs | Stopwatch fallback | Not implemented by this change. |
 
@@ -51,22 +51,60 @@ nominal remaining CPU time); the final CPU comparison still uses the original
 budget threshold. Do not label the converted units as guaranteed nanosecond
 accuracy.
 
-Initialization normally includes about 80 ms of sleeps and up to 6 ms of busy
-checks. Unity prewarms it before scene scripts run. It never adjusts thread
-priority, affinity, process-wide timer resolution, or power policy. Excessive
-startup contention can cause qualification to fail and select the diagnosed
-fallback.
+### Bounded startup retry policy
 
-The DLL exports only `cilbox_cpu_clock_frequency(uint64_t*)`; it returns:
+One attempt normally includes about 80 ms of requested sleeps and up to 6 ms
+of busy checks. Query failure (3), unstable calibration (4), and thread-cycle
+qualification failure (5) get **at most three total attempts**, with a 20 ms
+backoff between attempts. Unsupported architecture (1), missing invariant TSC
+(2), and unknown status codes stop immediately. The conservative acceptance
+checks and tolerances above are unchanged.
 
-| Result | Meaning |
+Every attempt starts with a zero candidate frequency. A failed candidate is
+discarded; success without a frequency is treated as query failure. The native
+`InitOnce` callback commits the final success or fallback after the bounded
+policy completes. It never returns `FALSE` for an ordinary qualification failure,
+so later clock opens cannot restart qualification indefinitely.
+
+At the maximum attempt count, initialization requests approximately 280 ms of
+sleeps plus at most 18 ms of busy checks. Scheduling can make actual wall duration
+longer. Unity prewarms before scene scripts run, and the managed admission barrier
+prepares the clock before the first Cilbox activation on any thread. Preparation
+publishes a terminal result for both success and fallback; subsequent entries
+and the 64-instruction checkpoints never recalibrate.
+
+The helper does not adjust thread priority, affinity, process-wide timer
+resolution, or power policy. Persistent qualification failure still selects the
+explicitly diagnosed Stopwatch fallback for the process. Automatic retries after
+execution has started are deliberately not part of this policy.
+
+### Native API
+
+| Export | Behavior |
+| --- | --- |
+| `cilbox_cpu_clock_frequency(uint64_t*)` | Existing initializer ABI, retained for guarded startup preparation and standalone native probes. Serializes through `InitOnce` and returns the final result after the bounded attempts. |
+| `cilbox_cpu_clock_cached_frequency(uint64_t*)` | Nonblocking lookup only. Never invokes or waits for `InitOnce`, sleeps, or retries. Returns status 6 and zero frequency until the terminal result is published. Managed reader opening uses only this export. |
+
+The initializer's caller must exclude all active Cilbox execution while
+preparing the clock. The managed preparation barrier enforces this by completing
+before any activation is admitted. The cached export publishes no intermediate
+candidate and returns a frequency only for successful qualification.
+
+| Result | Meaning / retry policy |
 | --- | --- |
 | 0 | Qualified; output contains the estimated TSC ticks per second. |
-| 1 | Unsupported native architecture. |
-| 2 | Invariant TSC not reported. |
-| 3 | Native clock query/calibration failed. |
-| 4 | Frequency samples were unstable or implausible. |
-| 5 | Thread-cycle wait/busy qualification failed. |
+| 1 | Unsupported native architecture; no retry. |
+| 2 | Invariant TSC not reported; no retry. |
+| 3 | Native query/calibration failed; retry within the startup bound. |
+| 4 | Frequency samples unstable or implausible; retry within the startup bound. |
+| 5 | Thread-cycle wait/busy qualification failed; retry within the startup bound. |
+| 6 | Cached lookup is not prepared; lookup never initializes or retries. |
+
+`CilboxCpuClockRetry.h` contains the exact production attempt policy, including
+fresh candidates, success-frequency validation, status classification, attempt
+bound, and backoff placement. Portable fault-injection tests include this header
+and substitute attempt/wait callbacks; they do not duplicate the algorithm.
+Those tests do not by themselves prove Win32 `InitOnce` behavior or clock accuracy.
 
 ## Reproducible bundled DLL
 
@@ -81,20 +119,22 @@ Toolchain used for the checked-in binary:
 - Ubuntu package `gcc-mingw-w64-x86-64-posix` `13.2.0-6ubuntu1+26.1`.
 - Compiler identifies as `x86_64-w64-mingw32-gcc (GCC) 13-posix`.
 - GNU ld `2.41.90.20240122`.
-- PE32+ x86-64 DLL, 11,020 bytes; timestamp zero.
+- PE32+ x86-64 DLL, 11,693 bytes; timestamp zero.
 - Imports only `KERNEL32.dll`; no MSVC runtime or MinGW runtime DLL dependency.
 
 SHA-256:
 
 - `CilboxCpuClockWin64.c`:
-  `43bdff5e6ffa9bc5f8f132f30d08a5901f608c20bb0fa099e8ba0fb42e567c31`
+  `8a8c6995ba7ccc6b19a4652b9d5c1f11e85762dbea90a856b9046f8c6aa2d835`
+- `CilboxCpuClockRetry.h`:
+  `01c64797e5d48bc907138689a521e794cf8575621ce1168b6c6478a7d759076c`
 - `CilboxCpuClockWin64.dll`:
-  `761f48e96ee557b3af61f6734ad5950e208f6cae066aba06c60a54f989cdd073`
+  `814909320f9c8c6620c1a7c6bf8372e619d47a37c187f82dc6338d7584a8fdbb`
 
 The plugin importer enables this binary only for Windows x64 Editor and
 Standalone. Native sources live in `Native~` so Unity does not compile them into
 IL2CPP players a second time. Mono receives the prebuilt DLL; IL2CPP calls the
-same C export through ordinary P/Invoke.
+same C exports through ordinary P/Invoke.
 
 ## Validation limits
 

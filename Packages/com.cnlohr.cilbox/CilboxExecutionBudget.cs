@@ -41,6 +41,7 @@ namespace Cilbox
 			currentThread ?? (currentThread = new ThreadState());
 
 		// Tests replace these only while all scopes are idle.
+		internal static Action ClockPreparation = CilboxThreadCpuClock.EnsurePreparedForExecution;
 		internal static Func<ICilboxThreadCpuClock> ClockFactory = CilboxThreadCpuClock.OpenCurrentThread;
 		internal static Func<long> WallTimestampProvider = Stopwatch.GetTimestamp;
 		internal static long WallFrequency = Stopwatch.Frequency;
@@ -71,6 +72,9 @@ namespace Cilbox
 
 		internal void Enter(CilboxMethod method)
 		{
+			// Every thread passes the same one-time preparation barrier before an
+			// activation exists. Calibration/retries cannot run inside a parent scope.
+			ClockPreparation();
 			ThreadState thread = CurrentThreadState;
 			if (thread.Active.Count == 0) thread.Instructions = 0;
 			Exception pending = SettleThread(thread, method, 0);

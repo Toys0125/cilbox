@@ -18,6 +18,10 @@ jobs:
       run: TestCilbox/bin/Release/net8.0/TestCilbox
     - name: Test CPU execution budgets
       run: dotnet run --project TestCilboxCpuBudget/TestCilboxCpuBudget.csproj --configuration Release
+    - name: Test native clock qualification retry policy
+      run: |
+        cc -std=c11 -O2 -Wall -Wextra -Werror TestCilboxCpuBudget/native_qualification_policy_tests.c -o "$RUNNER_TEMP/cilbox-clock-policy-tests"
+        "$RUNNER_TEMP/cilbox-clock-policy-tests"
     - name: "Produce cilbox unitypackage."
       timeout-minutes: 5
       run:
@@ -32,12 +36,24 @@ jobs:
   windows-cpu-budgets:
     runs-on: windows-latest
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - sdk: '8.x'
+          framework: net8.0
+        - sdk: '10.x'
+          framework: net10.0
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: '8.x'
+        dotnet-version: ${{ matrix.sdk }}
+    - name: Restore CPU budget tests
+      run: dotnet restore TestCilboxCpuBudget/TestCilboxCpuBudget.csproj -p:TargetFramework=${{ matrix.framework }}
+    - name: Build CPU budget tests
+      run: dotnet build TestCilboxCpuBudget/TestCilboxCpuBudget.csproj --configuration Release -p:TargetFramework=${{ matrix.framework }} --no-restore
     - name: Test Windows thread CPU clock and execution budgets
-      run: dotnet run --project TestCilboxCpuBudget/TestCilboxCpuBudget.csproj --configuration Release
+      run: dotnet TestCilboxCpuBudget/bin/Release/${{ matrix.framework }}/TestCilboxCpuBudget.dll
 
 

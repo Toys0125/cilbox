@@ -13,9 +13,10 @@ The default target is .NET 8, with no external NuGet packages:
 dotnet run --project TestCilboxCpuBudget/TestCilboxCpuBudget.csproj -c Release
 ```
 
-The process emits JSON containing the runtime, architecture, selected CPU clock,
-named results, and failure details. Exit code 0 means every test passed; 1 means
-a regression failed; 2 means initialization or platform support failed.
+The managed suite currently contains 31 cases. The process emits JSON containing
+the runtime, architecture, selected CPU clock, named results, and failure details.
+Exit code 0 means every test passed; 1 means a regression failed; 2 means
+initialization or platform support failed.
 
 On Linux, a C compiler is required. The project builds a tiny shared library into
 its output directory to verify that synchronous native CPU work counts. On
@@ -69,9 +70,41 @@ reset and budget change. A mixed fallback/CPU clock history remains clearly
 identified in diagnostics. The injected factories are restored after each test,
 and the tests verify that readers and active scopes were released.
 
+Preparation-barrier tests use the real `Enter` path with an isolated
+`CilboxClockPreparation`. They verify that concurrent entries wait before any
+reader or accounting scope exists, preparation CPU precedes the first budget,
+and nested/later entries never repeat a completed preparation. A terminal
+fallback cannot be retried or change an active reader. Unexpected exceptions
+are cached and preserve their identity, and recursive entry during preparation
+is rejected without leaking a scope.
+
 These tests do not attribute CPU performed on unrelated worker or GC threads.
 They also do not establish Unity player compatibility, DLL deployment in a
 player, hardware clock behavior on untested machines, or native-call preemption.
+
+## Test the bounded Windows qualification policy without Windows hardware
+
+The portable C harness includes the exact retry-policy header used by the
+Windows DLL. From the repository root:
+
+```sh
+cc -std=c11 -O2 -Wall -Wextra -Werror TestCilboxCpuBudget/native_qualification_policy_tests.c -o /tmp/cilbox-clock-policy-tests
+/tmp/cilbox-clock-policy-tests
+```
+
+The 14 cases inject complete qualification outcomes. They cover a transient
+status 5 followed by success, statuses 3 and 4, permanent statuses 1 and 2, and
+exhaustion after exactly three total attempts. They also verify at most two
+20 ms retry waits, no wait after termination, no publication of failed
+candidates, a fresh candidate for every attempt, unknown-status rejection, and
+rejection of success without a positive frequency. The waits are injected
+callbacks; the policy tests do not sleep.
+
+This tests the shared retry policy without weakening or bypassing the real
+qualification checks in the DLL. It does not exercise Windows `InitOnce`,
+physical TSC/QPC behavior, DLL loading, or actual Windows clock precision.
+The managed barrier tests separately cover one-time serialization and admission
+before interpreter execution. The revised DLL still requires a Windows run.
 
 ## Measure interpreter overhead
 
@@ -118,6 +151,11 @@ different .NET JIT can change both interpreter throughput and the relative
 overhead; do not transfer a .NET 8 percentage to .NET 10 or to a Unity player.
 
 ## Recorded Linux ARM64 results
+
+These performance samples predate the bounded-startup-retry follow-up. Their
+source hashes and original 26-case correctness results are preserved below;
+they are not a fresh benchmark of the preparation barrier. The current managed
+suite adds five preparation cases and passed 31/31 on .NET 8 and .NET 10.
 
 The included [net8 results](results/linux-arm64-net8.json) and
 [net10 results](results/linux-arm64-net10.json) preserve all 9 measured samples,
